@@ -44,6 +44,7 @@ except ModuleNotFoundError:
     else:
         raise
 from sync_logic import (
+    PruneResult,
     SyncProtocol,
     Synchronizer,
     normalize_rel_path,
@@ -87,6 +88,7 @@ class TestFileCore(unittest.TestCase):
         self.assertTrue(hasattr(sync, "check_paths"))
         self.assertTrue(hasattr(sync, "checkPaths"))
         self.assertTrue(hasattr(sync, "is_symlink"))
+        self.assertTrue(hasattr(sync, "PruneResult"))
 
     def test_directory_creation_and_removal(self):
         sub_dir = os.path.join(self.path, "subdir_test")
@@ -364,15 +366,16 @@ class TestSyncLogic(unittest.TestCase):
         base_drive = self.target
         jobs = [
             {"source": self.source, "target_dir": "valid_target"},
+            {"source": self.source, "target_dir": "valid_folder/./sub/../target2"},
             {"source": self.source, "target_dir": "../../escaped"},
             {"source": self.source, "target_dir": "C:drive_scoped"},
             {"source": self.source, "target_dir": "/absolute/path"},
             {"source": self.source, "target_dir": "nested/../../escape2"},
         ]
         validated = validate_jobs(jobs, base_drive)
-        # Only the first job should be accepted
-        self.assertEqual(len(validated), 1)
+        self.assertEqual(len(validated), 2)
         self.assertEqual(validated[0]["target_dir"], "valid_target")
+        self.assertEqual(validated[1]["target_dir"], os.path.normpath("valid_folder/target2"))
 
     def test_archive_uuid_token_length(self):
         protocol = SyncProtocol(use_stdout=False)
@@ -463,6 +466,39 @@ class TestSyncLogic(unittest.TestCase):
         # Verify start_ts was NOT overwritten by the second job
         self.assertEqual(protocol.start_ts, initial_start)
         self.assertGreaterEqual(protocol.ts_delta()[0], 0.04)
+
+    def test_synchronizer_case_sensitive_excludes(self):
+        protocol = SyncProtocol(use_stdout=False)
+        f_upper = os.path.join(self.source, "report.LOG")
+        f_lower = os.path.join(self.source, "data.log")
+        with open(f_upper, "w", encoding="utf-8") as f:
+            f.write("UPPER")
+        with open(f_lower, "w", encoding="utf-8") as f:
+            f.write("lower")
+
+        syncer = Synchronizer(max_workers=1, case_sensitive_excludes=True)
+        syncer.synchronize(self.source, self.target, doSync=True, archiv_path=self.archive, protocol=protocol, excludes=["*.LOG"])
+
+        self.assertFalse(os.path.exists(os.path.join(self.target, "report.LOG")))
+        self.assertTrue(os.path.exists(os.path.join(self.target, "data.log")))
+
+    def test_prune_result_properties(self):
+        protocol = SyncProtocol(use_stdout=False)
+        now = time.time()
+        sub = os.path.join(self.archive, "folder_to_prune")
+        file_core.make_directory(sub)
+        old_f = os.path.join(sub, "old.txt")
+        with open(old_f, "w", encoding="utf-8") as f:
+            f.write("data")
+        old_time = now - (100 * 86400)
+        os.utime(old_f, (old_time, old_time))
+
+        res = prune_archive(self.archive, retention_days=30, protocol=protocol, dry_run=False)
+        self.assertIsInstance(res, int)
+        self.assertEqual(res, 1)
+        self.assertEqual(res.files, 1)
+        self.assertEqual(res.dirs, 1)
+        self.assertEqual(res.total, 2)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@
     "force_hash": false,
     "verify_copy": true,
     "max_workers": 4,
-    "retention_days": 90
+    "retention_days": 90,
+    "case_sensitive_excludes": false
   }
 ]
