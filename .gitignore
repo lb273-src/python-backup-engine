@@ -1,0 +1,11 @@
+# Ignore local user configuration with private paths
+jobs.json
+
+# Ignore runtime protocols and timestamps
+protocol.txt
+bkupts.txt
+
+# Python bytecode and cache
+__pycache__/
+*.pyc
+*.pyo
