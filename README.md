@@ -162,7 +162,7 @@ python main_backup.py [OPTIONS]
 ├── bkup.sh / bkup.bat   # Cross-platform convenience launchers
 ├── jobs.json            # Synchronization job definitions (user-specific, git-ignored)
 ├── jobs.json.example    # Configuration template
-├── tests/               # Automated unit & regression test suite (19 tests)
+├── tests/               # Automated unit & regression test suite (20 tests)
 │   └── test_sync.py
 ├── LICENSE              # MIT License
 └── README.md            # This file
