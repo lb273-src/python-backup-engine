@@ -3,7 +3,7 @@
 A production-grade, dependency-free backup and directory synchronization suite written in pure Python for **Windows**, **Linux**, and **macOS**.  
 Designed around the principle of **zero data loss**, this engine replaces destructive synchronization with non-destructive versioned archiving, atomic write swaps, streaming checksum validation, and strict drive-level concurrency controls.
 
-**Version:** 1.2.2  
+**Version:** 1.2.3  
 **License:** MIT  
 **Requirements:** Python ≥ 3.8 (standard library only)
 
@@ -27,16 +27,17 @@ Designed around the principle of **zero data loss**, this engine replaces destru
 * **Copy-before-Prune Guarantee** – new/updated files are fully transferred and verified before any orphaned files are pruned.
 * **Inline Streaming SHA-256 Verification** – source and destination checksums are calculated simultaneously during the transfer.
 * **In-Memory Differential Pruning** – source paths are cataloged in-memory during backup, eliminating thousands of redundant disk roundtrips.
-* **Non-Destructive Archiving (`recyclebin`)** – replaced/deleted files and orphaned directory subtrees are moved to a versioned archive with microsecond timestamp + UUID token.
+* **Non-Destructive Archiving (`recyclebin`)** – replaced/deleted files and orphaned directory subtrees are moved to a versioned archive with microsecond timestamp + 10-char UUID token.
+* **Archive Retention Policy** – optional automatic pruning of archived versions older than N days (`retention_days` or `--retention-days`).
 * **Atomic Rollbacks** – on copy/hash failure the previously archived version is restored via `os.replace`.
 * **Sharing-Violation Resilience** – automatic retry delays on Windows when files are briefly locked by antiviruses or indexers (`WinError 32 / 5`).
 * **Hardware-Aware Drive Detection** – automatically finds USB drives / external volumes by looking for a `.backup_id` marker.
 * **Cross-Platform Drive Lock** – prevents concurrent runs on the same medium (`fcntl` / `msvcrt`) with stale-PID recovery and verified release.
 * **FAT32 / exFAT Friendly** – 2-second mtime tolerance avoids false re-syncs.
 * **Windows Long-Path Support** – paths exceeding 240 characters are handled via conditional `\\?\` prefixing.
-* **Cross-Platform Case-Awareness** – case-folding on Windows avoids collisions; exact case preservation on Linux/macOS.
+* **Cross-Platform Case-Awareness** – case-folding on Windows avoids collisions; optional case-sensitive pattern matching.
 * **Strict Path-Traversal Isolation** – `os.path.commonpath` verification prevents directory escape (`..`, drive-scoped, or UNC).
-* **Automatic Crash Recovery & Stale-Temp Cleanup** – cleans up interrupted staging files (`tmp_sync_*`, `tmp_rollback_*`) at startup.
+* **Automatic Crash Recovery & Stale-Temp Cleanup** – cleans up abandoned staging files (`tmp_sync_*`, `tmp_rollback_*`) older than 30 minutes at startup.
 * **Dry-Run Mode** – full simulation without modifying the target medium.
 
 ---
@@ -96,6 +97,7 @@ Designed around the principle of **zero data loss**, this engine replaces destru
 | `force_hash` | bool | `false` | Always compare via SHA-256 (ignore mtime/size) |
 | `verify_copy` | bool | `true` | Perform inline streaming SHA-256 verification |
 | `max_workers` | int | `4` | Thread-pool size for parallel file operations |
+| `retention_days` | int | `null` | Optional archive retention limit in days (purges older files from `recyclebin`) |
 
 ---
 
@@ -112,6 +114,7 @@ python main_backup.py [OPTIONS]
 | `-n, --dry-run` | Simulate only – no files are written or archived |
 | `-w, --workers N` | Override `max_workers` for all configured jobs |
 | `--no-verify` | Disable inline streaming SHA-256 verification |
+| `--retention-days N` | Prune archived versions older than N days from `recyclebin` (overrides jobs.json) |
 
 ---
 
@@ -159,7 +162,7 @@ python main_backup.py [OPTIONS]
 ├── bkup.sh / bkup.bat   # Cross-platform convenience launchers
 ├── jobs.json            # Synchronization job definitions (user-specific, git-ignored)
 ├── jobs.json.example    # Configuration template
-├── tests/               # Automated unit & regression test suite (15 tests)
+├── tests/               # Automated unit & regression test suite (19 tests)
 │   └── test_sync.py
 ├── LICENSE              # MIT License
 └── README.md            # This file

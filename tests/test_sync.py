@@ -43,7 +43,14 @@ except ModuleNotFoundError:
         spec.loader.exec_module(sync)
     else:
         raise
-from sync_logic import SyncProtocol, Synchronizer, normalize_rel_path
+from sync_logic import (
+    SyncProtocol,
+    Synchronizer,
+    normalize_rel_path,
+    build_ignore_patterns,
+    is_ignored,
+    prune_archive,
+)
 from main_backup import validate_jobs
 
 
@@ -157,11 +164,35 @@ class TestFileCore(unittest.TestCase):
         self.assertTrue(os.path.exists(tmp1))
         self.assertTrue(os.path.exists(tmp2))
 
+        # Backdate mtimes so they qualify as stale (> 1800s / 30 mins)
+        old_mtime = time.time() - 3600
+        os.utime(tmp1, (old_mtime, old_mtime))
+        os.utime(tmp2, (old_mtime, old_mtime))
+
         cleaned = file_core.cleanup_stale_temp_files(self.path)
         self.assertEqual(cleaned, 2)
         self.assertFalse(os.path.exists(tmp1))
         self.assertFalse(os.path.exists(tmp2))
         self.assertTrue(os.path.exists(normal))
+
+    def test_stale_temp_age_filter(self):
+        fresh_tmp = os.path.join(self.path, "tmp_sync_fresh")
+        stale_tmp = os.path.join(self.path, "tmp_sync_stale")
+
+        with open(fresh_tmp, "w", encoding="utf-8") as f:
+            f.write("fresh")
+        with open(stale_tmp, "w", encoding="utf-8") as f:
+            f.write("stale")
+
+        # Stale file is 1 hour old; fresh file is brand new
+        stale_mtime = time.time() - 3600
+        os.utime(stale_tmp, (stale_mtime, stale_mtime))
+
+        # Default age filter is 1800s (30 mins): only stale_tmp should be deleted
+        cleaned = file_core.cleanup_stale_temp_files(self.path, min_age_seconds=1800.0)
+        self.assertEqual(cleaned, 1)
+        self.assertTrue(os.path.exists(fresh_tmp))
+        self.assertFalse(os.path.exists(stale_tmp))
 
 
 class TestSyncLogic(unittest.TestCase):
@@ -342,6 +373,76 @@ class TestSyncLogic(unittest.TestCase):
         # Only the first job should be accepted
         self.assertEqual(len(validated), 1)
         self.assertEqual(validated[0]["target_dir"], "valid_target")
+
+    def test_archive_uuid_token_length(self):
+        protocol = SyncProtocol(use_stdout=False)
+        syncer = Synchronizer(max_workers=1)
+
+        f_target = os.path.join(self.target, "token_check.txt")
+        with open(f_target, "w", encoding="utf-8") as f:
+            f.write("data")
+
+        syncer.archive_file(f_target, self.target, self.archive, protocol)
+        archived_files = [f for f in os.listdir(self.archive) if f.startswith("token_check_")]
+        self.assertEqual(len(archived_files), 1)
+        archived_name = archived_files[0]
+        # Format: token_check_YYYY-MM-DD_HHMMSS_microseconds_token.txt
+        name_no_ext, _ = os.path.splitext(archived_name)
+        token = name_no_ext.split("_")[-1]
+        self.assertEqual(len(token), 10)
+
+    def test_ignore_patterns_case_sensitivity(self):
+        # Case insensitive (default)
+        patterns, negs = build_ignore_patterns(["*.LOG", "!Keep.LOG"], case_sensitive=False)
+        self.assertTrue(is_ignored("app.log", "logs/app.log", patterns, negs, case_sensitive=False))
+        self.assertTrue(is_ignored("APP.LOG", "logs/APP.LOG", patterns, negs, case_sensitive=False))
+        self.assertFalse(is_ignored("keep.log", "logs/keep.log", patterns, negs, case_sensitive=False))
+
+        # Case sensitive
+        patterns_cs, negs_cs = build_ignore_patterns(["*.LOG"], case_sensitive=True)
+        self.assertTrue(is_ignored("app.LOG", "logs/app.LOG", patterns_cs, negs_cs, case_sensitive=True))
+        self.assertFalse(is_ignored("app.log", "logs/app.log", patterns_cs, negs_cs, case_sensitive=True))
+
+    def test_archive_retention_pruning(self):
+        protocol = SyncProtocol(use_stdout=False)
+        now = time.time()
+
+        old_file = os.path.join(self.archive, "expired_file_2026-01-01_100000_123456_abcdef1234.txt")
+        recent_file = os.path.join(self.archive, "recent_file_2026-09-01_100000_123456_abcdef1234.txt")
+
+        sub_archive = os.path.join(self.archive, "expired_folder_2026-01-01_100000_1234567890")
+        file_core.make_directory(sub_archive)
+        old_nested_file = os.path.join(sub_archive, "nested.txt")
+
+        with open(old_file, "w", encoding="utf-8") as f:
+            f.write("old")
+        with open(recent_file, "w", encoding="utf-8") as f:
+            f.write("recent")
+        with open(old_nested_file, "w", encoding="utf-8") as f:
+            f.write("old nested")
+
+        # Set old files mtime to 60 days ago, recent file to 5 days ago
+        old_mtime = now - (60 * 86400)
+        recent_mtime = now - (5 * 86400)
+
+        os.utime(old_file, (old_mtime, old_mtime))
+        os.utime(old_nested_file, (old_mtime, old_mtime))
+        os.utime(recent_file, (recent_mtime, recent_mtime))
+
+        # Test Dry Run with 30 days retention
+        dry_pruned = prune_archive(self.archive, retention_days=30, protocol=protocol, dry_run=True)
+        self.assertEqual(dry_pruned, 2)
+        self.assertTrue(os.path.exists(old_file))
+        self.assertTrue(os.path.exists(old_nested_file))
+        self.assertTrue(os.path.exists(recent_file))
+
+        # Test Live Pruning with 30 days retention
+        live_pruned = prune_archive(self.archive, retention_days=30, protocol=protocol, dry_run=False)
+        self.assertEqual(live_pruned, 2)
+        self.assertFalse(os.path.exists(old_file))
+        self.assertFalse(os.path.exists(old_nested_file))
+        self.assertFalse(os.path.exists(sub_archive))  # Empty folder should have been removed
+        self.assertTrue(os.path.exists(recent_file))
 
 
 if __name__ == "__main__":

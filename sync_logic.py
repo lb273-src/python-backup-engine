@@ -18,6 +18,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 import uuid
 from collections import Counter
 from datetime import datetime
@@ -46,35 +47,37 @@ MAX_LOG_SIZE = 10 * 1024 * 1024  # 10 MB per protocol file
 MAX_LOG_BACKUPS = 5
 
 
-def build_ignore_patterns(excludes: Optional[List[str]] = None) -> Tuple[Set[str], Set[str]]:
-    active_patterns = set(DEFAULT_EXCLUDES)
+def build_ignore_patterns(excludes: Optional[List[str]] = None, case_sensitive: bool = False) -> Tuple[Set[str], Set[str]]:
+    active_patterns = set(DEFAULT_EXCLUDES) if case_sensitive else {p.lower() for p in DEFAULT_EXCLUDES}
     negations = set()
 
     if excludes:
         for pattern in excludes:
             p_clean = pattern.strip()
             if p_clean.startswith('!'):
-                neg_target = p_clean[1:].lower()
+                neg_target = p_clean[1:] if case_sensitive else p_clean[1:].lower()
                 negations.add(neg_target)
                 active_patterns.discard(neg_target)
             else:
-                active_patterns.add(p_clean.lower())
+                p = p_clean if case_sensitive else p_clean.lower()
+                active_patterns.add(p)
 
     return active_patterns, negations
 
 
-def is_ignored(name: str, rel_path: str, ignore_patterns: Set[str], negations: Set[str]) -> bool:
-    norm_name = name.replace('\\', '/').lower()
-    norm_rel = rel_path.replace('\\', '/').lower()
+def is_ignored(name: str, rel_path: str, ignore_patterns: Set[str], negations: Set[str], case_sensitive: bool = False) -> bool:
+    norm_name = name.replace('\\', '/') if case_sensitive else name.replace('\\', '/').lower()
+    norm_rel = rel_path.replace('\\', '/') if case_sensitive else rel_path.replace('\\', '/').lower()
+    match_fn = fnmatch.fnmatchcase if case_sensitive else fnmatch.fnmatch
 
     for pattern in negations:
-        if fnmatch.fnmatch(norm_name, pattern) or fnmatch.fnmatch(norm_rel, pattern):
+        if match_fn(norm_name, pattern) or match_fn(norm_rel, pattern):
             return False
 
     for pattern in ignore_patterns:
-        if fnmatch.fnmatch(norm_name, pattern) or fnmatch.fnmatch(norm_rel, pattern):
+        if match_fn(norm_name, pattern) or match_fn(norm_rel, pattern):
             return True
-        if any(fnmatch.fnmatch(part, pattern) for part in norm_rel.split('/')):
+        if any(match_fn(part, pattern) for part in norm_rel.split('/')):
             return True
     return False
 
@@ -308,7 +311,7 @@ class Synchronizer:
         b_name, b_ext = os.path.splitext(os.path.basename(archiv_target))
 
         timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S_%f")
-        unique_token = uuid.uuid4().hex[:6]
+        unique_token = uuid.uuid4().hex[:10]
         archiv_file = os.path.join(b_dir, f"{b_name}_{timestamp}_{unique_token}{b_ext}")
 
         try:
@@ -344,7 +347,7 @@ class Synchronizer:
         b_name = os.path.basename(archiv_target)
 
         timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S_%f")
-        unique_token = uuid.uuid4().hex[:6]
+        unique_token = uuid.uuid4().hex[:10]
         archiv_dir = os.path.join(b_parent, f"{b_name}_{timestamp}_{unique_token}")
 
         try:
@@ -596,3 +599,49 @@ class Synchronizer:
         finally:
             protocol.set_stop_ts()
         return True
+
+
+def prune_archive(archiv_path: str, retention_days: int, protocol: SyncProtocol, dry_run: bool = False) -> int:
+    """
+    Prunes archived files and directory trees in archiv_path that are older than retention_days.
+    Returns the number of pruned items.
+    """
+    if retention_days <= 0 or not archiv_path or not file_core.is_dir(archiv_path):
+        return 0
+
+    cutoff_time = time.time() - (retention_days * 86400.0)
+    pruned_count = 0
+    protocol.add_protocol_entry(f'#retention-check {archiv_path} (limit: {retention_days} days)')
+
+    # Topdown=False ensures child files and subdirs are removed before their parent directories
+    for root, dirs, files in os.walk(archiv_path, topdown=False):
+        for f in files:
+            f_path = os.path.join(root, f)
+            try:
+                stat_info = os.stat(f_path)
+                if stat_info.st_mtime < cutoff_time:
+                    if dry_run:
+                        protocol.add_protocol_entry(f'[DRY-RUN] Would prune expired archive file ({retention_days}d limit): {f_path}')
+                        pruned_count += 1
+                    else:
+                        if file_core.remove_file(f_path):
+                            protocol.add_protocol_entry(f'Pruned expired archive file: {f_path}')
+                            pruned_count += 1
+            except OSError:
+                pass
+
+        for d in dirs:
+            d_path = os.path.join(root, d)
+            try:
+                # If directory is now empty or older than cutoff, prune empty dir
+                if not os.listdir(d_path):
+                    if dry_run:
+                        protocol.add_protocol_entry(f'[DRY-RUN] Would remove empty archive folder: {d_path}')
+                    else:
+                        file_core.remove_directory(d_path)
+            except OSError:
+                pass
+
+    if pruned_count > 0:
+        protocol.add_protocol_entry(f'Retention prune completed: {pruned_count} item(s) purged.')
+    return pruned_count

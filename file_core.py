@@ -342,20 +342,26 @@ def format_line(value: str) -> str:
 utf8_str = format_line
 
 
-def cleanup_stale_temp_files(target_dir: PathLike) -> int:
-    """Recursively search for and remove abandoned tmp_sync_* and tmp_rollback_* files."""
+def cleanup_stale_temp_files(target_dir: PathLike, min_age_seconds: float = 1800.0) -> int:
+    """
+    Recursively search for and remove abandoned tmp_sync_* and tmp_rollback_* files
+    whose modification time is older than min_age_seconds (default 30 minutes / 1800s).
+    """
     cleaned = 0
     if not is_dir(target_dir):
         return 0
 
+    now = time.time()
     try:
         for root, _, files in os.walk(_long_path(target_dir)):
             for f in files:
                 if f.startswith("tmp_sync_") or f.startswith("tmp_rollback_"):
                     full_path = os.path.join(root, f)
                     try:
-                        if remove_file(full_path):
-                            cleaned += 1
+                        stat_info = os.stat(_long_path(full_path))
+                        if (now - stat_info.st_mtime) >= min_age_seconds:
+                            if remove_file(full_path):
+                                cleaned += 1
                     except OSError:
                         pass
     except OSError:
