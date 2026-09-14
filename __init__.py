@@ -54,6 +54,7 @@ from .main_backup import (
 )
 from .sync_logic import (
     DEFAULT_EXCLUDES,
+    PruneResult,
     Synchronizer,
     SyncProtocol,
     build_ignore_patterns,
@@ -62,7 +63,7 @@ from .sync_logic import (
     prune_archive,
 )
 
-__version__ = "1.2.3"
+__version__ = "1.2.4"
 __author__ = "Dipl.-Ing. (FH) Ludger Bröring"
 __license__ = "MIT"
 
@@ -70,6 +71,7 @@ __all__ = [
     # Engine & Protocol
     "Synchronizer",
     "SyncProtocol",
+    "PruneResult",
     "DEFAULT_EXCLUDES",
     "build_ignore_patterns",
     "is_ignored",

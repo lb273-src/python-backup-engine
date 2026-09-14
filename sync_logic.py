@@ -293,10 +293,11 @@ class SyncProtocol:
 
 
 class Synchronizer:
-    def __init__(self, max_workers: int = 1, dry_run: bool = False, verify_copy: bool = True):
+    def __init__(self, max_workers: int = 1, dry_run: bool = False, verify_copy: bool = True, case_sensitive_excludes: bool = False):
         self.max_workers = max_workers
         self.dry_run = dry_run
         self.verify_copy = verify_copy
+        self.case_sensitive_excludes = case_sensitive_excludes
 
     def archive_file(self, backup_file: str, backup_path: str, archiv_path: Optional[str], protocol: SyncProtocol) -> Tuple[bool, Optional[str]]:
         if not archiv_path or not file_core.is_dir(archiv_path):
@@ -439,7 +440,7 @@ class Synchronizer:
             protocol.add_protocol_entry(f'File sync error on {origin_file}: {e}')
 
     def backup(self, source_path: str, backup_path: str, archiv_path: Optional[str], protocol: SyncProtocol, excludes: Optional[List[str]] = None, force_hash: bool = False) -> Set[str]:
-        ignore_patterns, negations = build_ignore_patterns(excludes)
+        ignore_patterns, negations = build_ignore_patterns(excludes, case_sensitive=self.case_sensitive_excludes)
         protocol.add_protocol_entry(f'#backup  {source_path}  {backup_path}')
 
         file_tasks: List[Tuple[str, str]] = []
@@ -453,7 +454,7 @@ class Synchronizer:
             for d in dirs:
                 full_d = os.path.join(root, d)
                 rel_d = os.path.join(rel_root_clean, d)
-                if is_ignored(d, rel_d, ignore_patterns, negations):
+                if is_ignored(d, rel_d, ignore_patterns, negations, case_sensitive=self.case_sensitive_excludes):
                     continue
                 if file_core.is_symlink(full_d):
                     protocol.add_protocol_entry(f'Skipping symbolic link directory traversal: {full_d}')
@@ -461,7 +462,7 @@ class Synchronizer:
                 valid_dirs.append(d)
             dirs[:] = valid_dirs
 
-            files[:] = [f for f in files if not is_ignored(f, os.path.join(rel_root_clean, f), ignore_patterns, negations)]
+            files[:] = [f for f in files if not is_ignored(f, os.path.join(rel_root_clean, f), ignore_patterns, negations, case_sensitive=self.case_sensitive_excludes)]
 
             for dir_name in dirs:
                 origin_directory = os.path.join(root, dir_name)
@@ -509,7 +510,7 @@ class Synchronizer:
         if not os.path.exists(backup_path):
             return
 
-        ignore_patterns, negations = build_ignore_patterns(excludes)
+        ignore_patterns, negations = build_ignore_patterns(excludes, case_sensitive=self.case_sensitive_excludes)
         protocol.add_protocol_entry(f'#prune {backup_path}')
 
         known_sources = known_source_files or set()
@@ -518,7 +519,7 @@ class Synchronizer:
             rel_root = os.path.relpath(root, backup_path)
             rel_root_clean = "" if rel_root == "." else rel_root
 
-            dirs[:] = [d for d in dirs if not is_ignored(d, os.path.join(rel_root_clean, d), ignore_patterns, negations)]
+            dirs[:] = [d for d in dirs if not is_ignored(d, os.path.join(rel_root_clean, d), ignore_patterns, negations, case_sensitive=self.case_sensitive_excludes)]
 
             surviving_dirs = []
             for d in dirs:
@@ -552,7 +553,7 @@ class Synchronizer:
             dirs[:] = surviving_dirs
 
             for f in files:
-                if is_ignored(f, os.path.join(rel_root_clean, f), ignore_patterns, negations):
+                if is_ignored(f, os.path.join(rel_root_clean, f), ignore_patterns, negations, case_sensitive=self.case_sensitive_excludes):
                     continue
 
                 backup_file = os.path.join(root, f)
@@ -606,16 +607,37 @@ class Synchronizer:
         return True
 
 
-def prune_archive(archiv_path: str, retention_days: int, protocol: SyncProtocol, dry_run: bool = False) -> int:
+class PruneResult(int):
     """
-    Prunes archived files and directory trees in archiv_path that are older than retention_days.
-    Returns the number of pruned items.
+    Result of an archive prune operation.
+    Subclasses int (equal to files purged) for seamless backwards compatibility,
+    while exposing .files, .dirs, and .total attributes.
+    """
+    files: int
+    dirs: int
+
+    def __new__(cls, files: int, dirs: int):
+        obj = super().__new__(cls, files)
+        obj.files = files
+        obj.dirs = dirs
+        return obj
+
+    @property
+    def total(self) -> int:
+        return self.files + self.dirs
+
+
+def prune_archive(archiv_path: str, retention_days: int, protocol: SyncProtocol, dry_run: bool = False) -> PruneResult:
+    """
+    Prunes archived files and empty directory trees in archiv_path that are older than retention_days.
+    Returns a PruneResult (int subclass) representing the number of pruned files, with .dirs and .total attributes.
     """
     if retention_days <= 0 or not archiv_path or not file_core.is_dir(archiv_path):
-        return 0
+        return PruneResult(0, 0)
 
     cutoff_time = time.time() - (retention_days * 86400.0)
-    pruned_count = 0
+    files_pruned = 0
+    dirs_pruned = 0
     protocol.add_protocol_entry(f'#retention-check {archiv_path} (limit: {retention_days} days)')
 
     # Topdown=False ensures child files and subdirs are removed before their parent directories
@@ -627,26 +649,28 @@ def prune_archive(archiv_path: str, retention_days: int, protocol: SyncProtocol,
                 if stat_info.st_mtime < cutoff_time:
                     if dry_run:
                         protocol.add_protocol_entry(f'[DRY-RUN] Would prune expired archive file ({retention_days}d limit): {f_path}')
-                        pruned_count += 1
+                        files_pruned += 1
                     else:
                         if file_core.remove_file(f_path):
                             protocol.add_protocol_entry(f'Pruned expired archive file: {f_path}')
-                            pruned_count += 1
+                            files_pruned += 1
             except OSError:
                 pass
 
         for d in dirs:
             d_path = os.path.join(root, d)
             try:
-                # If directory is now empty or older than cutoff, prune empty dir
+                # If directory is now empty, prune empty dir
                 if not os.listdir(d_path):
                     if dry_run:
                         protocol.add_protocol_entry(f'[DRY-RUN] Would remove empty archive folder: {d_path}')
+                        dirs_pruned += 1
                     else:
-                        file_core.remove_directory(d_path)
+                        if file_core.remove_directory(d_path):
+                            dirs_pruned += 1
             except OSError:
                 pass
 
-    if pruned_count > 0:
-        protocol.add_protocol_entry(f'Retention prune completed: {pruned_count} item(s) purged.')
-    return pruned_count
+    if files_pruned > 0 or dirs_pruned > 0:
+        protocol.add_protocol_entry(f'Retention prune completed: {files_pruned} file(s) and {dirs_pruned} empty folder(s) purged.')
+    return PruneResult(files_pruned, dirs_pruned)

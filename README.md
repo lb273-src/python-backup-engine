@@ -3,7 +3,7 @@
 A production-grade, dependency-free backup and directory synchronization suite written in pure Python for **Windows**, **Linux**, and **macOS**.  
 Designed around the principle of **zero data loss**, this engine replaces destructive synchronization with non-destructive versioned archiving, atomic write swaps, streaming checksum validation, and strict drive-level concurrency controls.
 
-**Version:** 1.2.3  
+**Version:** 1.2.4  
 **License:** MIT  
 **Requirements:** Python ≥ 3.8 (standard library only)
 
@@ -98,6 +98,7 @@ Designed around the principle of **zero data loss**, this engine replaces destru
 | `verify_copy` | bool | `true` | Perform inline streaming SHA-256 verification |
 | `max_workers` | int | `4` | Thread-pool size for parallel file operations |
 | `retention_days` | int | `null` | Optional archive retention limit in days (purges older files from `recyclebin`) |
+| `case_sensitive_excludes` | bool | `false` | Enforce case-sensitive exclude pattern matching |
 
 ---
 
@@ -115,6 +116,7 @@ python main_backup.py [OPTIONS]
 | `-w, --workers N` | Override `max_workers` for all configured jobs |
 | `--no-verify` | Disable inline streaming SHA-256 verification |
 | `--retention-days N` | Prune archived versions older than N days from `recyclebin` (overrides jobs.json) |
+| `--case-sensitive-excludes` | Enforce case-sensitive matching for exclude patterns (overrides jobs.json) |
 
 ---
 
@@ -162,7 +164,7 @@ python main_backup.py [OPTIONS]
 ├── bkup.sh / bkup.bat   # Cross-platform convenience launchers
 ├── jobs.json            # Synchronization job definitions (user-specific, git-ignored)
 ├── jobs.json.example    # Configuration template
-├── tests/               # Automated unit & regression test suite (20 tests)
+├── tests/               # Automated unit & regression test suite (22 tests)
 │   └── test_sync.py
 ├── LICENSE              # MIT License
 └── README.md            # This file

@@ -259,7 +259,8 @@ def validate_jobs(jobs: List[Dict[str, Any]], base_drive: str) -> List[Dict[str,
             print(f"WARNING: Skipping job entry at index {idx} missing required 'source' or 'target_dir' keys.")
             continue
 
-        target_dir = str(job["target_dir"]).strip()
+        raw_target = str(job["target_dir"]).strip()
+        target_dir = os.path.normpath(raw_target)
 
         # Reject absolute paths, drive-scoped paths (e.g. C:foo), UNC paths, or directory traversal
         if os.path.isabs(target_dir) or re.match(r'^[a-zA-Z]:', target_dir) or target_dir.startswith('\\\\') or '..' in Path(target_dir).parts:
@@ -290,10 +291,13 @@ def validate_jobs(jobs: List[Dict[str, Any]], base_drive: str) -> List[Dict[str,
             except (ValueError, TypeError):
                 retention_days = None
 
+        case_sensitive_excludes = bool(job.get("case_sensitive_excludes", False))
+
         validated.append({
             "source": str(job["source"]).strip(),
             "target_dir": target_dir,
             "excludes": list(job.get("excludes", [])),
+            "case_sensitive_excludes": case_sensitive_excludes,
             "force_hash": bool(job.get("force_hash", False)),
             "verify_copy": bool(job.get("verify_copy", True)),
             "max_workers": int(job.get("max_workers", 4)),
@@ -310,6 +314,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("-w", "--workers", type=int, default=None, help="Override worker thread count for all jobs")
     parser.add_argument("--no-verify", action="store_true", help="Disable inline streaming SHA-256 verification")
     parser.add_argument("--retention-days", type=int, default=None, help="Prune archived versions older than N days from recyclebin (overrides jobs.json)")
+    parser.add_argument("--case-sensitive-excludes", action="store_true", help="Enforce case-sensitive matching for exclude patterns (overrides jobs.json)")
     return parser.parse_args()
 
 
@@ -366,10 +371,12 @@ def main() -> None:
                         if not args.dry_run:
                             file_core.make_directory(bk_target)
 
+                        case_sensitive = args.case_sensitive_excludes or job["case_sensitive_excludes"]
                         synchronizer = Synchronizer(
                             max_workers=max_workers,
                             dry_run=args.dry_run,
-                            verify_copy=verify_copy
+                            verify_copy=verify_copy,
+                            case_sensitive_excludes=case_sensitive
                         )
 
                         synchronizer.synchronize(
@@ -385,9 +392,9 @@ def main() -> None:
                         retention = args.retention_days if args.retention_days is not None else job.get("retention_days")
                         if retention and retention > 0 and archive_target and os.path.exists(archive_target):
                             pruned = prune_archive(archive_target, retention, protocol, dry_run=args.dry_run)
-                            if pruned > 0:
+                            if pruned.files > 0 or pruned.dirs > 0:
                                 action_str = "[DRY-RUN] Would prune" if args.dry_run else "Pruned"
-                                print(f"{action_str} {pruned} expired archive file(s) (> {retention} days) in {archive_target}")
+                                print(f"{action_str} {pruned.files} expired archive file(s) and {pruned.dirs} empty folder(s) in {archive_target}")
                 except KeyboardInterrupt:
                     print("\nBackup aborted by user signal.")
                 finally:
