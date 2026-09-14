@@ -34,6 +34,9 @@ Designed around the principle of **zero data loss**, this engine replaces destru
 * **Cross-Platform Drive Lock** – prevents concurrent runs on the same medium (`fcntl` / `msvcrt`) with stale-PID recovery and verified release.
 * **FAT32 / exFAT Friendly** – 2-second mtime tolerance avoids false re-syncs.
 * **Windows Long-Path Support** – paths exceeding 240 characters are handled via conditional `\\?\` prefixing.
+* **Cross-Platform Case-Awareness** – case-folding on Windows avoids collisions; exact case preservation on Linux/macOS.
+* **Strict Path-Traversal Isolation** – `os.path.commonpath` verification prevents directory escape (`..`, drive-scoped, or UNC).
+* **Automatic Crash Recovery & Stale-Temp Cleanup** – cleans up interrupted staging files (`tmp_sync_*`, `tmp_rollback_*`) at startup.
 * **Dry-Run Mode** – full simulation without modifying the target medium.
 
 ---
@@ -117,6 +120,8 @@ python main_backup.py [OPTIONS]
 * **Archive-before-Overwrite / Delete** – an obsolete or modified file is only overwritten or removed after being safely copied to `recyclebin`.
 * **Streaming Verification** – when `verify_copy=true`, SHA-256 digests of source and target are computed simultaneously during block streaming.
 * **Atomic Replace** – staged writes happen via unique temporary files in the destination directory, finalized via atomic `os.replace`.
+* **Path-Traversal Barrier** – all configured job destinations are strictly bounded to the backup drive root via `os.path.commonpath`.
+* **Stale-Temp Cleanup** – orphaned staging files from aborted previous processes are swept on orchestrator startup.
 * **Drive Lock** – exclusive medium lock prevents duplicate process execution; locks are freed strictly after ownership validation.
 * **Stale-Lock Recovery** – abandoned locks from dead PIDs or processes older than 2 hours are recycled safely.
 
@@ -152,7 +157,10 @@ python main_backup.py [OPTIONS]
 ├── sync_logic.py        # Core synchronizer, protocol handler, in-memory pruning
 ├── main_backup.py       # CLI orchestrator & drive locking
 ├── bkup.sh / bkup.bat   # Cross-platform convenience launchers
-├── jobs.json            # Synchronization job definitions
+├── jobs.json            # Synchronization job definitions (user-specific, git-ignored)
+├── jobs.json.example    # Configuration template
+├── tests/               # Automated unit & regression test suite (15 tests)
+│   └── test_sync.py
 ├── LICENSE              # MIT License
 └── README.md            # This file
 ```
