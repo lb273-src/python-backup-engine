@@ -29,10 +29,10 @@ if SCRIPT_DIR not in sys.path:
 
 try:
     from . import file_core
-    from .sync_logic import SyncProtocol, Synchronizer
+    from .sync_logic import SyncProtocol, Synchronizer, prune_archive
 except ImportError:
     import file_core  # type: ignore # pyright: ignore
-    from sync_logic import SyncProtocol, Synchronizer  # type: ignore # pyright: ignore
+    from sync_logic import SyncProtocol, Synchronizer, prune_archive  # type: ignore # pyright: ignore
 
 
 def is_pid_running(pid: int) -> bool:
@@ -283,13 +283,21 @@ def validate_jobs(jobs: List[Dict[str, Any]], base_drive: str) -> List[Dict[str,
             print(f"SECURITY ERROR: Job {idx} target '{target_dir}' escapes backup drive! Skipping.")
             continue
 
+        retention_days = None
+        if job.get("retention_days") is not None:
+            try:
+                retention_days = int(job["retention_days"])
+            except (ValueError, TypeError):
+                retention_days = None
+
         validated.append({
             "source": str(job["source"]).strip(),
             "target_dir": target_dir,
             "excludes": list(job.get("excludes", [])),
             "force_hash": bool(job.get("force_hash", False)),
             "verify_copy": bool(job.get("verify_copy", True)),
-            "max_workers": int(job.get("max_workers", 4))
+            "max_workers": int(job.get("max_workers", 4)),
+            "retention_days": retention_days
         })
     return validated
 
@@ -301,6 +309,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("-n", "--dry-run", action="store_true", help="Simulate synchronization without writing changes")
     parser.add_argument("-w", "--workers", type=int, default=None, help="Override worker thread count for all jobs")
     parser.add_argument("--no-verify", action="store_true", help="Disable inline streaming SHA-256 verification")
+    parser.add_argument("--retention-days", type=int, default=None, help="Prune archived versions older than N days from recyclebin (overrides jobs.json)")
     return parser.parse_args()
 
 
@@ -372,6 +381,13 @@ def main() -> None:
                             excludes=job_excludes,
                             force_hash=force_hash
                         )
+
+                        retention = args.retention_days if args.retention_days is not None else job.get("retention_days")
+                        if retention and retention > 0 and archive_target and os.path.exists(archive_target):
+                            pruned = prune_archive(archive_target, retention, protocol, dry_run=args.dry_run)
+                            if pruned > 0:
+                                action_str = "[DRY-RUN] Would prune" if args.dry_run else "Pruned"
+                                print(f"{action_str} {pruned} expired archive file(s) (> {retention} days) in {archive_target}")
                 except KeyboardInterrupt:
                     print("\nBackup aborted by user signal.")
                 finally:

@@ -59,9 +59,10 @@ from .sync_logic import (
     build_ignore_patterns,
     is_ignored,
     normalize_rel_path,
+    prune_archive,
 )
 
-__version__ = "1.2.2"
+__version__ = "1.2.3"
 __author__ = "Dipl.-Ing. (FH) Ludger Bröring"
 __license__ = "MIT"
 
@@ -73,6 +74,7 @@ __all__ = [
     "build_ignore_patterns",
     "is_ignored",
     "normalize_rel_path",
+    "prune_archive",
     # Core File Operations
     "check_paths",
     "cleanup_stale_temp_files",
