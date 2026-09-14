@@ -13,6 +13,7 @@ Python Backup & Synchronization Suite
 from .file_core import (
     backup_ts,
     check_paths,
+    cleanup_stale_temp_files,
     copy_file,
     format_line,
     get_sha256,
@@ -57,9 +58,10 @@ from .sync_logic import (
     SyncProtocol,
     build_ignore_patterns,
     is_ignored,
+    normalize_rel_path,
 )
 
-__version__ = "1.2.1"
+__version__ = "1.2.2"
 __author__ = "Dipl.-Ing. (FH) Ludger Bröring"
 __license__ = "MIT"
 
@@ -70,8 +72,10 @@ __all__ = [
     "DEFAULT_EXCLUDES",
     "build_ignore_patterns",
     "is_ignored",
+    "normalize_rel_path",
     # Core File Operations
     "check_paths",
+    "cleanup_stale_temp_files",
     "copy_file",
     "get_sha256",
     "is_child_path",

@@ -261,12 +261,25 @@ def validate_jobs(jobs: List[Dict[str, Any]], base_drive: str) -> List[Dict[str,
 
         target_dir = str(job["target_dir"]).strip()
 
-        if os.path.isabs(target_dir):
-            print(f"SECURITY ERROR: Job {idx} uses absolute path '{target_dir}'. Skipping.")
+        # Reject absolute paths, drive-scoped paths (e.g. C:foo), UNC paths, or directory traversal
+        if os.path.isabs(target_dir) or re.match(r'^[a-zA-Z]:', target_dir) or target_dir.startswith('\\\\') or '..' in Path(target_dir).parts:
+            print(f"SECURITY ERROR: Job {idx} uses absolute, traversal, or drive-scoped path '{target_dir}'. Skipping.")
             continue
 
-        planned_target = Path(os.path.join(base_drive, target_dir)).resolve()
-        if planned_target != base_drive_resolved and not file_core.is_child_path(base_drive_resolved, planned_target):
+        base_resolved = os.path.realpath(os.path.abspath(base_drive))
+        planned_target = os.path.realpath(os.path.abspath(os.path.join(base_resolved, target_dir)))
+
+        try:
+            common = os.path.commonpath([base_resolved, planned_target])
+            is_inside = (
+                common.lower() == base_resolved.lower()
+                if sys.platform == "win32"
+                else common == base_resolved
+            )
+        except (ValueError, OSError):
+            is_inside = False
+
+        if not is_inside:
             print(f"SECURITY ERROR: Job {idx} target '{target_dir}' escapes backup drive! Skipping.")
             continue
 
@@ -312,6 +325,11 @@ def main() -> None:
         with lock_manager:
             protocol_file = os.path.join(bdrive, 'protocol.txt')
             archived_base = os.path.join(bdrive, 'recyclebin')
+
+            if not args.dry_run:
+                stale_cleaned = file_core.cleanup_stale_temp_files(bdrive)
+                if stale_cleaned > 0:
+                    print(f"Cleaned up {stale_cleaned} abandoned temporary file(s) on backup drive.")
 
             try:
                 raw_jobs = load_jobs(args.config)

@@ -79,6 +79,19 @@ def is_ignored(name: str, rel_path: str, ignore_patterns: Set[str], negations: S
     return False
 
 
+def normalize_rel_path(path: str, platform: Optional[str] = None) -> str:
+    """
+    Normalizes relative paths for cross-platform matching.
+    On Windows, lowercases to ensure case-insensitive matching without false conflicts.
+    On POSIX (Linux/macOS), preserves case to support case-sensitive file sisters.
+    """
+    norm = path.replace('\\', '/')
+    plat = platform or sys.platform
+    if plat == "win32":
+        return norm.lower()
+    return norm
+
+
 class SyncProtocol:
     def __init__(self, log_file: Optional[str] = None, use_stdout: bool = True):
         self.log_file = log_file
@@ -463,7 +476,7 @@ class Synchronizer:
 
             for file_name in files:
                 origin_file = os.path.join(root, file_name)
-                rel_file = os.path.relpath(origin_file, source_path).replace('\\', '/').lower()
+                rel_file = normalize_rel_path(os.path.relpath(origin_file, source_path))
                 source_rel_files.add(rel_file)
                 backup_file = os.path.join(backup_path, os.path.relpath(origin_file, source_path))
                 file_tasks.append((origin_file, backup_file))
@@ -538,7 +551,7 @@ class Synchronizer:
                     continue
 
                 backup_file = os.path.join(root, f)
-                rel_file = os.path.relpath(backup_file, backup_path).replace('\\', '/').lower()
+                rel_file = normalize_rel_path(os.path.relpath(backup_file, backup_path))
 
                 if rel_file not in known_sources:
                     protocol.inc_stat('files_checked')
