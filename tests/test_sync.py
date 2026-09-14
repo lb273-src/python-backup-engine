@@ -444,6 +444,26 @@ class TestSyncLogic(unittest.TestCase):
         self.assertFalse(os.path.exists(sub_archive))  # Empty folder should have been removed
         self.assertTrue(os.path.exists(recent_file))
 
+    def test_multi_job_timing_preservation(self):
+        protocol = SyncProtocol(use_stdout=False)
+        syncer = Synchronizer(max_workers=1)
+
+        # First job
+        f1 = os.path.join(self.source, "file1.txt")
+        with open(f1, "w", encoding="utf-8") as f:
+            f.write("content 1")
+        syncer.synchronize(self.source, self.target, doSync=True, archiv_path=self.archive, protocol=protocol)
+        initial_start = protocol.start_ts
+        self.assertIsNotNone(initial_start)
+
+        time.sleep(0.05)
+
+        # Second job with same protocol
+        syncer.synchronize(self.source, self.target, doSync=True, archiv_path=self.archive, protocol=protocol)
+        # Verify start_ts was NOT overwritten by the second job
+        self.assertEqual(protocol.start_ts, initial_start)
+        self.assertGreaterEqual(protocol.ts_delta()[0], 0.04)
+
 
 if __name__ == "__main__":
     unittest.main()

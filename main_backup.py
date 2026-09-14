@@ -391,6 +391,7 @@ def main() -> None:
                 except KeyboardInterrupt:
                     print("\nBackup aborted by user signal.")
                 finally:
+                    protocol.set_stop_ts()
                     protocol.write_statistics()
                     sys.stdout.flush()
                     print(f"\nProtocol successfully written to {protocol_file}")

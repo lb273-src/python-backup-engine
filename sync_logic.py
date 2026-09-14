@@ -212,9 +212,10 @@ class SyncProtocol:
                 print(value)
                 sys.stdout.flush()
 
-    def set_start_ts(self) -> None:
+    def set_start_ts(self, force: bool = False) -> None:
         with self._lock:
-            self.start_ts = datetime.now()
+            if self.start_ts is None or force:
+                self.start_ts = datetime.now()
 
     def set_stop_ts(self) -> None:
         with self._lock:
@@ -284,6 +285,7 @@ class SyncProtocol:
                 self._file_handle = None
 
     def __enter__(self) -> 'SyncProtocol':
+        self.set_start_ts()
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
@@ -575,6 +577,7 @@ class Synchronizer:
 
     def synchronize(self, origin_path: str, backup_path: str, doSync: bool, archiv_path: Optional[str], protocol: SyncProtocol, excludes: Optional[List[str]] = None, force_hash: bool = False) -> bool:
         protocol.set_start_ts()
+        job_start = time.time()
         try:
             valid, msg = file_core.check_paths(origin_path, backup_path, allow_missing_backup=self.dry_run)
             if not valid:
@@ -597,7 +600,9 @@ class Synchronizer:
             protocol.add_protocol_entry(f'synchronize fatal error: {err}')
             protocol.inc_stat('errors')
         finally:
+            job_elapsed = time.time() - job_start
             protocol.set_stop_ts()
+            protocol.add_protocol_entry(f'Job completed in {job_elapsed:.2f}s ({origin_path} -> {backup_path})')
         return True
 
 
