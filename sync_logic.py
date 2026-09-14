@@ -316,17 +316,41 @@ class Synchronizer:
             protocol.inc_stat('errors')
             return False, None
 
-    def archive_directory(self, backup_directory: str, backup_path: str, archiv_path: Optional[str], protocol: SyncProtocol) -> None:
-        if not archiv_path or not file_core.is_dir(archiv_path) or self.dry_run:
-            return
+    def archive_directory(self, backup_directory: str, backup_path: str, archiv_path: Optional[str], protocol: SyncProtocol) -> Tuple[bool, Optional[str]]:
+        if not archiv_path or not file_core.is_dir(archiv_path):
+            return False, None
+
+        if self.dry_run:
+            protocol.add_protocol_entry(f'[DRY-RUN] Would archive directory tree: {backup_directory}')
+            return True, None
+
         rel_path = os.path.relpath(backup_directory, backup_path)
-        archiv_directory = os.path.join(archiv_path, rel_path)
-        if not file_core.path_exists(archiv_directory):
-            try:
-                file_core.make_directory(archiv_directory)
-                protocol.inc_stat('directories_created')
-            except OSError:
-                pass
+        archiv_target = os.path.join(archiv_path, rel_path)
+
+        b_parent = os.path.dirname(archiv_target)
+        b_name = os.path.basename(archiv_target)
+
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S_%f")
+        unique_token = uuid.uuid4().hex[:6]
+        archiv_dir = os.path.join(b_parent, f"{b_name}_{timestamp}_{unique_token}")
+
+        try:
+            file_core.make_directory(b_parent)
+
+            # Target directory collision cleanup (safety check)
+            if file_core.path_exists(archiv_dir):
+                file_core.remove_directory(archiv_dir)
+
+            file_core.remove_readonly(backup_directory)
+            shutil.move(backup_directory, archiv_dir)
+            protocol.add_protocol_entry(f'archived (moved) directory tree {backup_directory} -> {archiv_dir}')
+            return True, archiv_dir
+        except FileNotFoundError:
+            return False, None
+        except Exception as e:
+            protocol.add_protocol_entry(f'Archive directory move error for {backup_directory}: {e}')
+            protocol.inc_stat('errors')
+            return False, None
 
     def _sync_single_file(self, origin_file: str, backup_file: str, backup_path: str, archiv_path: Optional[str], protocol: SyncProtocol, force_hash: bool) -> None:
         protocol.inc_stat('files_checked')
@@ -491,14 +515,19 @@ class Synchronizer:
                         protocol.add_protocol_entry(f'[DRY-RUN] Would prune directory tree: {backup_dir}')
                     else:
                         if archiv_path:
-                            self.archive_directory(backup_dir, backup_path, archiv_path, protocol)
-                        try:
-                            shutil.rmtree(backup_dir)
-                            protocol.inc_stat('directories_deleted')
-                            protocol.add_protocol_entry(f'remove directory tree {backup_dir}')
-                        except OSError as e:
-                            protocol.inc_stat('errors')
-                            protocol.add_protocol_entry(f'Remove dir error {backup_dir}: {e}')
+                            success, arch_dir = self.archive_directory(backup_dir, backup_path, archiv_path, protocol)
+                            if success:
+                                protocol.inc_stat('directories_deleted')
+                            else:
+                                protocol.add_protocol_entry(f'PRESERVED: Directory tree kept due to archive error: {backup_dir}')
+                        else:
+                            try:
+                                file_core.remove_directory(backup_dir)
+                                protocol.inc_stat('directories_deleted')
+                                protocol.add_protocol_entry(f'remove directory tree {backup_dir}')
+                            except OSError as e:
+                                protocol.inc_stat('errors')
+                                protocol.add_protocol_entry(f'Remove dir error {backup_dir}: {e}')
                 else:
                     surviving_dirs.append(d)
 
@@ -531,7 +560,7 @@ class Synchronizer:
     def synchronize(self, origin_path: str, backup_path: str, doSync: bool, archiv_path: Optional[str], protocol: SyncProtocol, excludes: Optional[List[str]] = None, force_hash: bool = False) -> bool:
         protocol.set_start_ts()
         try:
-            valid, msg = file_core.check_paths(origin_path, backup_path)
+            valid, msg = file_core.check_paths(origin_path, backup_path, allow_missing_backup=self.dry_run)
             if not valid:
                 protocol.add_protocol_entry(f'Invalid paths: {msg}')
                 protocol.inc_stat('errors')

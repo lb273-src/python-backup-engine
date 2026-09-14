@@ -28,7 +28,21 @@ if SYNC_DIR not in sys.path:
     sys.path.insert(0, SYNC_DIR)
 
 import file_core
-import sync
+try:
+    import sync
+except ModuleNotFoundError:
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "sync",
+        os.path.join(SYNC_DIR, "__init__.py"),
+        submodule_search_locations=[SYNC_DIR],
+    )
+    if spec and spec.loader:
+        sync = importlib.util.module_from_spec(spec)
+        sys.modules["sync"] = sync
+        spec.loader.exec_module(sync)
+    else:
+        raise
 from sync_logic import SyncProtocol, Synchronizer
 
 
@@ -229,6 +243,58 @@ class TestSyncLogic(unittest.TestCase):
         # Verify microsecond precision and unique UUID token present in all archive files
         for fname in files_in_archive:
             self.assertTrue("collision_file_" in fname)
+
+    def test_directory_tree_archiving(self):
+        # Create a nested directory structure with files in source
+        nested_dir = os.path.join(self.source, "subfolder", "nested")
+        file_core.make_directory(nested_dir)
+        nested_file = os.path.join(nested_dir, "payload.txt")
+        with open(nested_file, "w", encoding="utf-8") as f:
+            f.write("preserve this content")
+
+        protocol = SyncProtocol(use_stdout=False)
+        syncer = Synchronizer(max_workers=1)
+
+        # Initial synchronization
+        res = syncer.synchronize(
+            origin_path=self.source,
+            backup_path=self.target,
+            doSync=True,
+            archiv_path=self.archive,
+            protocol=protocol
+        )
+        self.assertTrue(res)
+        target_nested_file = os.path.join(self.target, "subfolder", "nested", "payload.txt")
+        self.assertTrue(os.path.exists(target_nested_file))
+
+        # Now simulate deleting the entire subfolder on source
+        file_core.remove_directory(os.path.join(self.source, "subfolder"))
+        self.assertFalse(os.path.exists(os.path.join(self.source, "subfolder")))
+
+        # Sync again with doSync=True
+        protocol2 = SyncProtocol(use_stdout=False)
+        res2 = syncer.synchronize(
+            origin_path=self.source,
+            backup_path=self.target,
+            doSync=True,
+            archiv_path=self.archive,
+            protocol=protocol2
+        )
+        self.assertTrue(res2)
+
+        # The subfolder must be pruned from target
+        self.assertFalse(os.path.exists(os.path.join(self.target, "subfolder")))
+
+        # But the entire directory tree must be archived non-destructively
+        archive_subfolders = [d for d in os.listdir(self.archive) if "subfolder_" in d]
+        self.assertEqual(len(archive_subfolders), 1)
+
+        archived_payload = os.path.join(self.archive, archive_subfolders[0], "nested", "payload.txt")
+        self.assertTrue(os.path.exists(archived_payload))
+        with open(archived_payload, "r", encoding="utf-8") as f:
+            self.assertEqual(f.read(), "preserve this content")
+
+        self.assertGreaterEqual(protocol2.directories_deleted, 1)
 
 
 if __name__ == "__main__":

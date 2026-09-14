@@ -226,7 +226,7 @@ def is_child_path(parent: PathLike, child: PathLike) -> bool:
 is_subdirectory = is_child_path
 
 
-def check_paths(origin_path: PathLike, backup_path: PathLike) -> Tuple[bool, str]:
+def check_paths(origin_path: PathLike, backup_path: PathLike, allow_missing_backup: bool = False) -> Tuple[bool, str]:
     try:
         p_orig = Path(origin_path).resolve()
         p_back = Path(backup_path).resolve()
@@ -235,17 +235,19 @@ def check_paths(origin_path: PathLike, backup_path: PathLike) -> Tuple[bool, str
 
     if not is_dir(p_orig):
         return False, f"{origin_path} is not an existing directory."
-    if not is_dir(p_back):
+    if not allow_missing_backup and not is_dir(p_back):
         return False, f"{backup_path} is not an existing directory."
 
     try:
-        if os.path.samefile(p_orig, p_back):
+        if p_back.exists() and os.path.samefile(p_orig, p_back):
             return False, "Origin and backup paths are identical."
     except OSError:
-        if sys.platform == "win32" and str(p_orig).lower() == str(p_back).lower():
-            return False, "Origin and backup paths are identical."
-        elif str(p_orig) == str(p_back):
-            return False, "Origin and backup paths are identical."
+        pass
+
+    if sys.platform == "win32" and str(p_orig).lower() == str(p_back).lower():
+        return False, "Origin and backup paths are identical."
+    elif str(p_orig) == str(p_back):
+        return False, "Origin and backup paths are identical."
 
     if is_child_path(p_orig, p_back):
         return False, f"{backup_path} is subdirectory of {origin_path}"

@@ -3,7 +3,7 @@
 A production-grade, dependency-free backup and directory synchronization suite written in pure Python for **Windows**, **Linux**, and **macOS**.  
 Designed around the principle of **zero data loss**, this engine replaces destructive synchronization with non-destructive versioned archiving, atomic write swaps, streaming checksum validation, and strict drive-level concurrency controls.
 
-**Version:** 1.2.1  
+**Version:** 1.2.2  
 **License:** MIT  
 **Requirements:** Python ≥ 3.8 (standard library only)
 
@@ -27,7 +27,7 @@ Designed around the principle of **zero data loss**, this engine replaces destru
 * **Copy-before-Prune Guarantee** – new/updated files are fully transferred and verified before any orphaned files are pruned.
 * **Inline Streaming SHA-256 Verification** – source and destination checksums are calculated simultaneously during the transfer.
 * **In-Memory Differential Pruning** – source paths are cataloged in-memory during backup, eliminating thousands of redundant disk roundtrips.
-* **Non-Destructive Archiving (`recyclebin`)** – replaced or deleted files are moved to a versioned archive with microsecond timestamp + UUID token.
+* **Non-Destructive Archiving (`recyclebin`)** – replaced/deleted files and orphaned directory subtrees are moved to a versioned archive with microsecond timestamp + UUID token.
 * **Atomic Rollbacks** – on copy/hash failure the previously archived version is restored via `os.replace`.
 * **Sharing-Violation Resilience** – automatic retry delays on Windows when files are briefly locked by antiviruses or indexers (`WinError 32 / 5`).
 * **Hardware-Aware Drive Detection** – automatically finds USB drives / external volumes by looking for a `.backup_id` marker.
@@ -127,7 +127,7 @@ python main_backup.py [OPTIONS]
 | Topic | Limitation | Recommendation |
 | --- | --- | --- |
 | **Network filesystems (SMB/NFS)** | Mandatory locking may be unavailable. The engine falls back to an advisory lock with explicit warnings. | Prefer local / USB drives for critical data. Avoid starting concurrent jobs on the same network share. |
-| **Directory Pruning** | When an entire directory subtree no longer exists at source, the orphan tree on backup is pruned top-down. | Ensure directory trees intended for permanent retention are present in source or ignored via `excludes`. |
+| **Directory Pruning** | When an entire directory subtree no longer exists at source, the orphan tree is moved atomically to the versioned archive (`recyclebin`) with timestamp and UUID token. | Reversible zero-data-loss behavior; directory structures and files remain fully preserved in archive. |
 | **Symlinks / Junctions** | Symbolic links and Windows junction points are **skipped** to avoid infinite traversal loops. | Keep mission-critical data in regular directory trees. |
 | **Special File Attributes** | Hardlinks, sparse files, ADS, POSIX ACLs, and extended attributes are not preserved. | Use archive formats (e.g. tar/squashfs) if file system metadata beyond mtime/permissions is required. |
 | **Memory Footprint** | All relative paths per job are cataloged in an in-memory set to maximize I/O throughput. | Recommended for datasets up to ~2-3 million files per job. |
