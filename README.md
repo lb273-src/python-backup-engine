@@ -11,6 +11,7 @@ Designed around the principle of **zero data loss**, this engine replaces destru
 
 ## 📑 Table of Contents
 - [✨ Key Highlights](#-key-highlights)
+- [🎯 Design Philosophy & Scope](#-design-philosophy--scope)
 - [🏗️ System Architecture](#-system-architecture)
 - [🚀 Quick Start](#-quick-start)
 - [⚙️ Configuration Guide (`jobs.json`)](#-configuration-guide-jobsjson)
@@ -39,6 +40,30 @@ Designed around the principle of **zero data loss**, this engine replaces destru
 * **Strict Path-Traversal Isolation** – `os.path.commonpath` verification prevents directory escape (`..`, drive-scoped, or UNC).
 * **Automatic Crash Recovery & Stale-Temp Cleanup** – cleans up abandoned staging files (`tmp_sync_*`, `tmp_rollback_*`) older than 30 minutes at startup.
 * **Dry-Run Mode** – full simulation without modifying the target medium.
+
+---
+
+## 🎯 Design Philosophy & Scope
+
+### Target Audience & Core Strengths
+* **Cleartext File-System Mirroring** – backups are stored directly as standard files and directories on target media. No proprietary containers, opaque chunk databases, or encrypted silos that risk catastrophic unrecoverable corruption from a single damaged sector.
+* **Zero Third-Party Dependencies** – relies exclusively on Python standard library modules (`os`, `shutil`, `hashlib`, `uuid`). Completely immune to broken pip dependencies or external package supply-chain risks.
+* **Single-Admin / Trusted Workstations & Home-Servers** – engineered for developers, power users, and system administrators backing up their workstations, servers, or external USB drives where `jobs.json` is centrally and trustedly configured.
+
+### Non-Goals / Threat Model Boundaries
+* **Multi-Tenant / Shared Hosting** – not designed for environments where untrusted local users have interactive shell access to source directories and could attempt race-condition attacks (e.g. symlink swaps during active traversal).
+* **Enterprise Daemons & Webhooks** – operates as a clean, single-run CLI tool. For email or webhook alerting on failures, integrate the process exit code directly into your scheduling wrapper:
+  ```bash
+  # Linux / macOS cron example
+  ./bkup.sh || curl -X POST -d "Backup failed!" https://alert.example.com/webhook
+  ```
+  ```cmd
+  :: Windows Task Scheduler / batch example
+  call bkup.bat
+  if %errorlevel% neq 0 (
+      powershell -Command "Invoke-RestMethod -Uri 'https://alert.example.com/webhook' -Method Post -Body 'Backup failed'"
+  )
+  ```
 
 ---
 
