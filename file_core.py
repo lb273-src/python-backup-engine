@@ -342,3 +342,18 @@ utf8_str = format_line
 
 def backup_ts() -> str:
     return f"#{datetime.now().strftime('%d-%m-%Y-%H:%M:%S')}"
+
+
+# Backward compatibility aliases (legacy camelCase API)
+removeFile = remove_file
+removeDirectory = remove_directory
+makeDirectory = make_directory
+copyFile = copy_file
+pathExists = path_exists
+isFile = is_file
+isDir = is_dir
+isReadonly = is_readonly
+getSha256 = get_sha256
+isDifferent = is_different
+syncMetadata = sync_metadata
+checkPaths = check_paths

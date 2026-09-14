@@ -115,6 +115,71 @@ class SyncProtocol:
         with self._lock:
             return self.stats['errors']
 
+    @errors.setter
+    def errors(self, value: int) -> None:
+        with self._lock:
+            self.stats['errors'] = value
+
+    @property
+    def files_checked(self) -> int:
+        with self._lock:
+            return self.stats['files_checked']
+
+    @files_checked.setter
+    def files_checked(self, value: int) -> None:
+        with self._lock:
+            self.stats['files_checked'] = value
+
+    @property
+    def files_updated(self) -> int:
+        with self._lock:
+            return self.stats['files_updated']
+
+    @files_updated.setter
+    def files_updated(self, value: int) -> None:
+        with self._lock:
+            self.stats['files_updated'] = value
+
+    @property
+    def files_deleted(self) -> int:
+        with self._lock:
+            return self.stats['files_deleted']
+
+    @files_deleted.setter
+    def files_deleted(self, value: int) -> None:
+        with self._lock:
+            self.stats['files_deleted'] = value
+
+    @property
+    def directories_checked(self) -> int:
+        with self._lock:
+            return self.stats['directories_checked']
+
+    @directories_checked.setter
+    def directories_checked(self, value: int) -> None:
+        with self._lock:
+            self.stats['directories_checked'] = value
+
+    @property
+    def directories_created(self) -> int:
+        with self._lock:
+            return self.stats['directories_created']
+
+    @directories_created.setter
+    def directories_created(self, value: int) -> None:
+        with self._lock:
+            self.stats['directories_created'] = value
+
+    @property
+    def directories_deleted(self) -> int:
+        with self._lock:
+            return self.stats['directories_deleted']
+
+    @directories_deleted.setter
+    def directories_deleted(self, value: int) -> None:
+        with self._lock:
+            self.stats['directories_deleted'] = value
+
     def inc_stat(self, stat_name: str, value: int = 1) -> None:
         with self._lock:
             self.stats[stat_name] += value
