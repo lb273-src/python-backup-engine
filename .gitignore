@@ -1,0 +1,16 @@
+# Ignore local user configuration with private paths
+jobs.json
+
+# Ignore runtime protocols and timestamps
+protocol.txt
+bkupts.txt
+
+# Internal audit reports
+code.audit.md
+*.audit.md
+
+# Python bytecode and cache
+__pycache__/
+*.pyc
+*.pyo
+
