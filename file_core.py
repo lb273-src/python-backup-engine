@@ -342,6 +342,27 @@ def format_line(value: str) -> str:
 utf8_str = format_line
 
 
+def cleanup_stale_temp_files(target_dir: PathLike) -> int:
+    """Recursively search for and remove abandoned tmp_sync_* and tmp_rollback_* files."""
+    cleaned = 0
+    if not is_dir(target_dir):
+        return 0
+
+    try:
+        for root, _, files in os.walk(_long_path(target_dir)):
+            for f in files:
+                if f.startswith("tmp_sync_") or f.startswith("tmp_rollback_"):
+                    full_path = os.path.join(root, f)
+                    try:
+                        if remove_file(full_path):
+                            cleaned += 1
+                    except OSError:
+                        pass
+    except OSError:
+        pass
+    return cleaned
+
+
 def backup_ts() -> str:
     return f"#{datetime.now().strftime('%d-%m-%Y-%H:%M:%S')}"
 

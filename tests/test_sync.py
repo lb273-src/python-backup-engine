@@ -43,7 +43,8 @@ except ModuleNotFoundError:
         spec.loader.exec_module(sync)
     else:
         raise
-from sync_logic import SyncProtocol, Synchronizer
+from sync_logic import SyncProtocol, Synchronizer, normalize_rel_path
+from main_backup import validate_jobs
 
 
 class TestFileCore(unittest.TestCase):
@@ -139,6 +140,28 @@ class TestFileCore(unittest.TestCase):
             self.assertFalse(file_core.is_symlink(target))
         except (OSError, NotImplementedError):
             pass
+
+    def test_stale_temp_cleanup(self):
+        # Create abandoned temp files in self.path
+        tmp1 = os.path.join(self.path, "tmp_sync_12345")
+        tmp2 = os.path.join(self.path, "tmp_rollback_67890")
+        normal = os.path.join(self.path, "important.txt")
+
+        with open(tmp1, "w", encoding="utf-8") as f:
+            f.write("temp")
+        with open(tmp2, "w", encoding="utf-8") as f:
+            f.write("temp")
+        with open(normal, "w", encoding="utf-8") as f:
+            f.write("keep")
+
+        self.assertTrue(os.path.exists(tmp1))
+        self.assertTrue(os.path.exists(tmp2))
+
+        cleaned = file_core.cleanup_stale_temp_files(self.path)
+        self.assertEqual(cleaned, 2)
+        self.assertFalse(os.path.exists(tmp1))
+        self.assertFalse(os.path.exists(tmp2))
+        self.assertTrue(os.path.exists(normal))
 
 
 class TestSyncLogic(unittest.TestCase):
@@ -295,6 +318,30 @@ class TestSyncLogic(unittest.TestCase):
             self.assertEqual(f.read(), "preserve this content")
 
         self.assertGreaterEqual(protocol2.directories_deleted, 1)
+
+    def test_case_sensitivity_normalization(self):
+        path = "MyDocuments\\SUBFOLDER\\File.TXT"
+        # Windows platform should lowercase
+        win_norm = normalize_rel_path(path, platform="win32")
+        self.assertEqual(win_norm, "mydocuments/subfolder/file.txt")
+
+        # Linux/POSIX platform should preserve case
+        linux_norm = normalize_rel_path(path, platform="linux")
+        self.assertEqual(linux_norm, "MyDocuments/SUBFOLDER/File.TXT")
+
+    def test_path_traversal_validation(self):
+        base_drive = self.target
+        jobs = [
+            {"source": self.source, "target_dir": "valid_target"},
+            {"source": self.source, "target_dir": "../../escaped"},
+            {"source": self.source, "target_dir": "C:drive_scoped"},
+            {"source": self.source, "target_dir": "/absolute/path"},
+            {"source": self.source, "target_dir": "nested/../../escape2"},
+        ]
+        validated = validate_jobs(jobs, base_drive)
+        # Only the first job should be accepted
+        self.assertEqual(len(validated), 1)
+        self.assertEqual(validated[0]["target_dir"], "valid_target")
 
 
 if __name__ == "__main__":
