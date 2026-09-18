@@ -1,7 +1,7 @@
 """
 Python Backup & Synchronization Suite
 
-@package     Sync
+@package     sync
 @file        __init__.py
 @description Package initializer exporting public API components and metadata.
 @author      Dipl.-Ing. (FH) Ludger Bröring

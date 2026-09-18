@@ -1,7 +1,7 @@
 """
 Python Backup & Synchronization Suite
 
-@package     Sync
+@package     sync
 @subpackage  Orchestrator
 @file        main_backup.py
 @description CLI orchestrator with stale-lock detection, O_EXCL exclusive lock, timestamp fallback, and robust job validation.
