@@ -1,7 +1,7 @@
 """
 Python Backup & Synchronization Suite
 
-@package     Sync
+@package     sync
 @subpackage  Core
 @file        file_core.py
 @description Low-level file system I/O, streaming copy with inline SHA-256 validation, retry logic, and path utilities.

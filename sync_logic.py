@@ -1,7 +1,7 @@
 """
 Python Backup & Synchronization Suite
 
-@package     Sync
+@package     sync
 @subpackage  Engine
 @file        sync_logic.py
 @description Core synchronization algorithm with In-Memory Pruning, atomic rollbacks, and unified locking.
