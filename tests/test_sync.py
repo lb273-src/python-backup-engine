@@ -52,7 +52,7 @@ from sync_logic import (
     is_ignored,
     prune_archive,
 )
-from main_backup import validate_jobs
+from main_backup import validate_jobs, prune_expired_archives
 
 
 class TestFileCore(unittest.TestCase):
@@ -76,6 +76,7 @@ class TestFileCore(unittest.TestCase):
         self.assertEqual(file_core.get_sha256, file_core.getSha256)
         self.assertEqual(file_core.is_different, file_core.isDifferent)
         self.assertEqual(file_core.sync_metadata, file_core.syncMetadata)
+        self.assertEqual(file_core.format_bytes, file_core.formatBytes)
 
     def test_init_exports(self):
         # Verify __init__.py exports both snake_case and legacy camelCase functions
@@ -89,6 +90,9 @@ class TestFileCore(unittest.TestCase):
         self.assertTrue(hasattr(sync, "checkPaths"))
         self.assertTrue(hasattr(sync, "is_symlink"))
         self.assertTrue(hasattr(sync, "PruneResult"))
+        self.assertTrue(hasattr(sync, "prune_expired_archives"))
+        self.assertTrue(hasattr(sync, "format_bytes"))
+        self.assertTrue(hasattr(sync, "formatBytes"))
 
     def test_directory_creation_and_removal(self):
         sub_dir = os.path.join(self.path, "subdir_test")
@@ -499,6 +503,140 @@ class TestSyncLogic(unittest.TestCase):
         self.assertEqual(res.files, 1)
         self.assertEqual(res.dirs, 1)
         self.assertEqual(res.total, 2)
+
+    def test_prune_expired_archives_pre_backup(self):
+        protocol = SyncProtocol(use_stdout=False)
+        now = time.time()
+
+        archived_base = os.path.join(self.base, "recyclebin")
+        file_core.make_directory(archived_base)
+
+        job_a_archive = os.path.join(archived_base, "job_a")
+        job_b_archive = os.path.join(archived_base, "job_b")
+        job_c_archive = os.path.join(archived_base, "job_c")
+        file_core.make_directory(job_a_archive)
+        file_core.make_directory(job_b_archive)
+        file_core.make_directory(job_c_archive)
+
+        old_a = os.path.join(job_a_archive, "old_a.txt")
+        new_a = os.path.join(job_a_archive, "new_a.txt")
+        old_b = os.path.join(job_b_archive, "old_b.txt")
+        new_b = os.path.join(job_b_archive, "new_b.txt")
+        old_c = os.path.join(job_c_archive, "old_c.txt")
+
+        for p in [old_a, new_a, old_b, new_b, old_c]:
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("content")
+
+        # Set mtimes:
+        # Job A has 30d retention: old_a (45d ago), new_a (5d ago)
+        # Job B has 10d retention: old_b (15d ago), new_b (2d ago)
+        # Job C has None retention: old_c (100d ago)
+        os.utime(old_a, (now - 45 * 86400, now - 45 * 86400))
+        os.utime(new_a, (now - 5 * 86400, now - 5 * 86400))
+        os.utime(old_b, (now - 15 * 86400, now - 15 * 86400))
+        os.utime(new_b, (now - 2 * 86400, now - 2 * 86400))
+        os.utime(old_c, (now - 100 * 86400, now - 100 * 86400))
+
+        jobs = [
+            {"target_dir": "job_a", "retention_days": 30},
+            {"target_dir": "job_b", "retention_days": 10},
+            {"target_dir": "job_c", "retention_days": None},
+        ]
+
+        # Dry run
+        dry_pruned = prune_expired_archives(jobs, archived_base, protocol, dry_run=True)
+        self.assertEqual(dry_pruned, 2)
+        self.assertEqual(protocol.archive_files_pruned, 2)
+        self.assertTrue(os.path.exists(old_a))
+        self.assertTrue(os.path.exists(old_b))
+        self.assertTrue(os.path.exists(old_c))
+
+        # Live run with fresh protocol
+        live_protocol = SyncProtocol(use_stdout=False)
+        live_pruned = prune_expired_archives(jobs, archived_base, live_protocol, dry_run=False)
+        self.assertEqual(live_pruned, 2)
+        self.assertEqual(live_protocol.archive_files_pruned, 2)
+        self.assertFalse(os.path.exists(old_a))
+        self.assertTrue(os.path.exists(new_a))
+        self.assertFalse(os.path.exists(old_b))
+        self.assertTrue(os.path.exists(new_b))
+        self.assertTrue(os.path.exists(old_c))  # No retention configured, kept
+
+        # Verify stats output formatting
+        stats_file = os.path.join(self.base, "stats_check.txt")
+        live_protocol.write_statistics(stats_file)
+        with open(stats_file, "r", encoding="utf-8") as f:
+            stats_content = f.read()
+        self.assertIn("ArchiveFilesPruned: 2", stats_content)
+        self.assertIn("ArchiveDirectoriesPruned: 0", stats_content)
+
+    def test_format_bytes(self):
+        self.assertEqual(file_core.format_bytes(0), "0 B")
+        self.assertEqual(file_core.format_bytes(512), "512 B")
+        self.assertEqual(file_core.format_bytes(1024), "1.00 KB")
+        self.assertEqual(file_core.format_bytes(1048576), "1.00 MB")
+        self.assertEqual(file_core.format_bytes(1073741824), "1.00 GB")
+        self.assertEqual(file_core.format_bytes(1099511627776), "1.00 TB")
+
+    def test_extended_statistics_tracking(self):
+        protocol = SyncProtocol(use_stdout=False)
+        syncer = Synchronizer(max_workers=1)
+
+        f_new = os.path.join(self.source, "new_file.txt")
+        f_mod = os.path.join(self.source, "mod_file.txt")
+        f_same = os.path.join(self.source, "same_file.txt")
+
+        with open(f_new, "w", encoding="utf-8") as f:
+            f.write("new content")
+        with open(f_mod, "w", encoding="utf-8") as f:
+            f.write("updated content")
+        with open(f_same, "w", encoding="utf-8") as f:
+            f.write("identical content")
+
+        # In target, create mod_file with old content and same_file with identical content
+        f_mod_target = os.path.join(self.target, "mod_file.txt")
+        f_same_target = os.path.join(self.target, "same_file.txt")
+        with open(f_mod_target, "w", encoding="utf-8") as f:
+            f.write("old content")
+        with open(f_same_target, "w", encoding="utf-8") as f:
+            f.write("identical content")
+        file_core.sync_metadata(f_same, f_same_target)
+
+        res = syncer.synchronize(
+            origin_path=self.source,
+            backup_path=self.target,
+            doSync=True,
+            archiv_path=self.archive,
+            protocol=protocol
+        )
+        self.assertTrue(res)
+
+        self.assertEqual(protocol.files_checked, 3)
+        self.assertEqual(protocol.files_created, 1)
+        self.assertEqual(protocol.files_modified, 1)
+        self.assertEqual(protocol.files_updated, 2)
+        self.assertEqual(protocol.files_archived, 1)
+        self.assertGreater(protocol.bytes_transferred, 0)
+
+        # Verify write_statistics with target_drive formatting
+        protocol.target_drive = self.target
+        stats_file = os.path.join(self.base, "full_stats.txt")
+        protocol.write_statistics(stats_file)
+        with open(stats_file, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        self.assertIn("FilesChecked: 3", content)
+        self.assertIn("FilesUnchanged: 1", content)
+        self.assertIn("FilesCreated: 1", content)
+        self.assertIn("FilesModified: 1", content)
+        self.assertIn("FilesUpdated: 2", content)
+        self.assertIn("FilesArchived: 1", content)
+        self.assertIn("DataTransferred:", content)
+        self.assertIn("TargetSpaceBefore:", content)
+        self.assertIn("TargetSpaceAfter:", content)
+        self.assertIn("TargetSpaceDelta:", content)
+        self.assertIn("TargetFreeSpace:", content)
 
 
 if __name__ == "__main__":

@@ -15,6 +15,7 @@ from .file_core import (
     check_paths,
     cleanup_stale_temp_files,
     copy_file,
+    format_bytes,
     format_line,
     get_sha256,
     is_child_path,
@@ -34,6 +35,7 @@ from .file_core import (
     # Backward compatibility aliases
     checkPaths,
     copyFile,
+    formatBytes,
     getSha256,
     isDifferent,
     isDir,
@@ -50,6 +52,7 @@ from .main_backup import (
     find_backup_drive,
     load_jobs,
     main as run_backup,
+    prune_expired_archives,
     validate_jobs,
 )
 from .sync_logic import (
@@ -63,7 +66,7 @@ from .sync_logic import (
     prune_archive,
 )
 
-__version__ = "1.2.4"
+__version__ = "1.2.5"
 __author__ = "Dipl.-Ing. (FH) Ludger Bröring"
 __license__ = "MIT"
 
@@ -96,11 +99,13 @@ __all__ = [
     "set_readonly",
     "sync_metadata",
     "backup_ts",
+    "format_bytes",
     "utf8_str",
     "format_line",
     # Backward compatibility aliases
     "checkPaths",
     "copyFile",
+    "formatBytes",
     "getSha256",
     "isDifferent",
     "isDir",
@@ -116,5 +121,6 @@ __all__ = [
     "find_backup_drive",
     "load_jobs",
     "validate_jobs",
+    "prune_expired_archives",
     "run_backup",
 ]

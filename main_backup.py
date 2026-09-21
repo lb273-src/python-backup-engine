@@ -306,6 +306,41 @@ def validate_jobs(jobs: List[Dict[str, Any]], base_drive: str) -> List[Dict[str,
     return validated
 
 
+def prune_expired_archives(
+    backup_jobs: List[Dict[str, Any]],
+    archived_base: str,
+    protocol: SyncProtocol,
+    dry_run: bool = False,
+    retention_override: Optional[int] = None
+) -> int:
+    """
+    Scans and prunes expired files and empty directories in the recyclebin/archive
+    for all configured backup jobs before synchronization begins, freeing up disk space.
+    Returns total number of files pruned.
+    """
+    total_pruned_files = 0
+    pruned_targets = set()
+    for job in backup_jobs:
+        archive_target = os.path.join(archived_base, job["target_dir"])
+        retention = retention_override if retention_override is not None else job.get("retention_days")
+        if retention and retention > 0 and archive_target and os.path.exists(archive_target):
+            target_key = (
+                os.path.normpath(archive_target).lower()
+                if sys.platform == "win32"
+                else os.path.normpath(archive_target),
+                retention
+            )
+            if target_key in pruned_targets:
+                continue
+            pruned_targets.add(target_key)
+            pruned = prune_archive(archive_target, retention, protocol, dry_run=dry_run)
+            total_pruned_files += pruned.files
+            if pruned.files > 0 or pruned.dirs > 0:
+                action_str = "[DRY-RUN] Would prune" if dry_run else "Pruned"
+                print(f"{action_str} {pruned.files} expired archive file(s) and {pruned.dirs} empty folder(s) in {archive_target}")
+    return total_pruned_files
+
+
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Python Incremental Backup & Synchronization Orchestrator")
     parser.add_argument("-c", "--config", default="jobs.json", help="Path to jobs.json configuration file")
@@ -356,7 +391,17 @@ def main() -> None:
                 sys.exit(1)
 
             with SyncProtocol(log_file=protocol_file, use_stdout=True) as protocol:
+                protocol.target_drive = bdrive
                 try:
+                    # Pre-Backup: Prune expired archive files across configured jobs to reclaim disk space
+                    prune_expired_archives(
+                        backup_jobs=backup_jobs,
+                        archived_base=archived_base,
+                        protocol=protocol,
+                        dry_run=args.dry_run,
+                        retention_override=args.retention_days
+                    )
+
                     for job in backup_jobs:
                         source = job["source"]
                         bk_target = os.path.join(bdrive, job["target_dir"])
@@ -388,13 +433,6 @@ def main() -> None:
                             excludes=job_excludes,
                             force_hash=force_hash
                         )
-
-                        retention = args.retention_days if args.retention_days is not None else job.get("retention_days")
-                        if retention and retention > 0 and archive_target and os.path.exists(archive_target):
-                            pruned = prune_archive(archive_target, retention, protocol, dry_run=args.dry_run)
-                            if pruned.files > 0 or pruned.dirs > 0:
-                                action_str = "[DRY-RUN] Would prune" if args.dry_run else "Pruned"
-                                print(f"{action_str} {pruned.files} expired archive file(s) and {pruned.dirs} empty folder(s) in {archive_target}")
                 except KeyboardInterrupt:
                     print("\nBackup aborted by user signal.")
                 finally:

@@ -3,7 +3,7 @@
 A production-grade, dependency-free backup and directory synchronization suite written in pure Python for **Windows**, **Linux**, and **macOS**.  
 Designed around the principle of **zero data loss**, this engine replaces destructive synchronization with non-destructive versioned archiving, atomic write swaps, streaming checksum validation, and strict drive-level concurrency controls.
 
-**Version:** 1.2.4  
+**Version:** 1.2.5  
 **License:** MIT  
 **Requirements:** Python ≥ 3.8 (standard library only)
 
@@ -29,7 +29,7 @@ Designed around the principle of **zero data loss**, this engine replaces destru
 * **Inline Streaming SHA-256 Verification** – source and destination checksums are calculated simultaneously during the transfer.
 * **In-Memory Differential Pruning** – source paths are cataloged in-memory during backup, eliminating thousands of redundant disk roundtrips.
 * **Non-Destructive Archiving (`recyclebin`)** – replaced/deleted files and orphaned directory subtrees are moved to a versioned archive with microsecond timestamp + 10-char UUID token.
-* **Archive Retention Policy** – optional automatic pruning of archived versions older than N days (`retention_days` or `--retention-days`).
+* **Pre-Backup Archive Retention Policy** – automatic early pruning of archived versions older than N days (`retention_days` or `--retention-days`) before backup transfers begin, immediately reclaiming disk space.
 * **Atomic Rollbacks** – on copy/hash failure the previously archived version is restored via `os.replace`.
 * **Sharing-Violation Resilience** – automatic retry delays on Windows when files are briefly locked by antiviruses or indexers (`WinError 32 / 5`).
 * **Hardware-Aware Drive Detection** – automatically finds USB drives / external volumes by looking for a `.backup_id` marker.
@@ -39,6 +39,7 @@ Designed around the principle of **zero data loss**, this engine replaces destru
 * **Cross-Platform Case-Awareness** – case-folding on Windows avoids collisions; optional case-sensitive pattern matching.
 * **Strict Path-Traversal Isolation** – `os.path.commonpath` verification prevents directory escape (`..`, drive-scoped, or UNC).
 * **Automatic Crash Recovery & Stale-Temp Cleanup** – cleans up abandoned staging files (`tmp_sync_*`, `tmp_rollback_*`) older than 30 minutes at startup.
+* **Comprehensive Storage & Performance Metrics** – tracks transferred volume, speed (MB/s), reclaimed storage, remaining free disk space, and breakdown of created, modified, archived, and unchanged files.
 * **Dry-Run Mode** – full simulation without modifying the target medium.
 
 ---
@@ -150,6 +151,7 @@ python main_backup.py [OPTIONS]
 * **Archive-before-Overwrite / Delete** – an obsolete or modified file is only overwritten or removed after being safely copied to `recyclebin`.
 * **Streaming Verification** – when `verify_copy=true`, SHA-256 digests of source and target are computed simultaneously during block streaming.
 * **Atomic Replace** – staged writes happen via unique temporary files in the destination directory, finalized via atomic `os.replace`.
+* **Pre-Backup Storage Reclamation** – expired archive files and empty directories in `recyclebin` are pruned *before* file copying starts, ensuring maximum free capacity and preventing out-of-disk-space errors.
 * **Path-Traversal Barrier** – all configured job destinations are strictly bounded to the backup drive root via `os.path.commonpath`.
 * **Stale-Temp Cleanup** – orphaned staging files from aborted previous processes are swept on orchestrator startup.
 * **Drive Lock** – exclusive medium lock prevents duplicate process execution; locks are freed strictly after ownership validation.
@@ -189,7 +191,7 @@ python main_backup.py [OPTIONS]
 ├── bkup.sh / bkup.bat   # Cross-platform convenience launchers
 ├── jobs.json            # Synchronization job definitions (user-specific, git-ignored)
 ├── jobs.json.example    # Configuration template
-├── tests/               # Automated unit & regression test suite (22 tests)
+├── tests/               # Automated unit & regression test suite (25 tests)
 │   └── test_sync.py
 ├── LICENSE              # MIT License
 └── README.md            # This file

@@ -373,6 +373,18 @@ def backup_ts() -> str:
     return f"#{datetime.now().strftime('%d-%m-%Y-%H:%M:%S')}"
 
 
+def format_bytes(size: Union[int, float]) -> str:
+    """
+    Format byte count into human-readable representation (B, KB, MB, GB, TB, PB).
+    """
+    s = float(size)
+    for unit in ['B', 'KB', 'MB', 'GB', 'TB', 'PB']:
+        if abs(s) < 1024.0:
+            return f"{s:.0f} B" if unit == 'B' else f"{s:.2f} {unit}"
+        s /= 1024.0
+    return f"{s:.2f} PB"
+
+
 # Backward compatibility aliases (legacy camelCase API)
 removeFile = remove_file
 removeDirectory = remove_directory
@@ -386,3 +398,4 @@ getSha256 = get_sha256
 isDifferent = is_different
 syncMetadata = sync_metadata
 checkPaths = check_paths
+formatBytes = format_bytes

@@ -102,6 +102,8 @@ class SyncProtocol:
         self.stats: Counter = Counter()
         self.start_ts: Optional[datetime] = None
         self.stop_ts: Optional[datetime] = None
+        self._target_drive: Optional[str] = None
+        self.initial_disk_usage: Optional[Any] = None
         self._file_handle: Optional[Any] = None
         self._lock = threading.RLock()
 
@@ -196,6 +198,117 @@ class SyncProtocol:
         with self._lock:
             self.stats['directories_deleted'] = value
 
+    @property
+    def archive_files_pruned(self) -> int:
+        with self._lock:
+            return self.stats['archive_files_pruned']
+
+    @archive_files_pruned.setter
+    def archive_files_pruned(self, value: int) -> None:
+        with self._lock:
+            self.stats['archive_files_pruned'] = value
+
+    @property
+    def archive_directories_pruned(self) -> int:
+        with self._lock:
+            return self.stats['archive_directories_pruned']
+
+    @archive_directories_pruned.setter
+    def archive_directories_pruned(self, value: int) -> None:
+        with self._lock:
+            self.stats['archive_directories_pruned'] = value
+
+    @property
+    def files_created(self) -> int:
+        with self._lock:
+            return self.stats['files_created']
+
+    @files_created.setter
+    def files_created(self, value: int) -> None:
+        with self._lock:
+            self.stats['files_created'] = value
+
+    @property
+    def files_modified(self) -> int:
+        with self._lock:
+            return self.stats['files_modified']
+
+    @files_modified.setter
+    def files_modified(self, value: int) -> None:
+        with self._lock:
+            self.stats['files_modified'] = value
+
+    @property
+    def metadata_updated(self) -> int:
+        with self._lock:
+            return self.stats['metadata_updated']
+
+    @metadata_updated.setter
+    def metadata_updated(self, value: int) -> None:
+        with self._lock:
+            self.stats['metadata_updated'] = value
+
+    @property
+    def files_archived(self) -> int:
+        with self._lock:
+            return self.stats['files_archived']
+
+    @files_archived.setter
+    def files_archived(self, value: int) -> None:
+        with self._lock:
+            self.stats['files_archived'] = value
+
+    @property
+    def directories_archived(self) -> int:
+        with self._lock:
+            return self.stats['directories_archived']
+
+    @directories_archived.setter
+    def directories_archived(self, value: int) -> None:
+        with self._lock:
+            self.stats['directories_archived'] = value
+
+    @property
+    def bytes_transferred(self) -> int:
+        with self._lock:
+            return self.stats['bytes_transferred']
+
+    @bytes_transferred.setter
+    def bytes_transferred(self, value: int) -> None:
+        with self._lock:
+            self.stats['bytes_transferred'] = value
+
+    @property
+    def archive_bytes_pruned(self) -> int:
+        with self._lock:
+            return self.stats['archive_bytes_pruned']
+
+    @archive_bytes_pruned.setter
+    def archive_bytes_pruned(self, value: int) -> None:
+        with self._lock:
+            self.stats['archive_bytes_pruned'] = value
+
+    @property
+    def target_drive(self) -> Optional[str]:
+        with self._lock:
+            return self._target_drive
+
+    @target_drive.setter
+    def target_drive(self, value: Optional[str]) -> None:
+        with self._lock:
+            self._target_drive = value
+            if value and os.path.exists(value) and self.initial_disk_usage is None:
+                self.record_initial_disk_usage(value)
+
+    def record_initial_disk_usage(self, drive: Optional[str] = None) -> None:
+        with self._lock:
+            target = drive or self._target_drive
+            if target and os.path.exists(target):
+                try:
+                    self.initial_disk_usage = shutil.disk_usage(target)
+                except OSError:
+                    pass
+
     def inc_stat(self, stat_name: str, value: int = 1) -> None:
         with self._lock:
             self.stats[stat_name] += value
@@ -240,16 +353,73 @@ class SyncProtocol:
     def write_statistics(self, filename: Optional[str] = None) -> None:
         nl = '\n'
         with self._lock:
+            files_checked = self.stats['files_checked']
+            files_created = self.stats['files_created']
+            files_modified = self.stats['files_modified']
+            files_updated = self.stats['files_updated'] or (files_created + files_modified)
+            errors = self.stats['errors']
+            files_unchanged = max(0, files_checked - (files_created + files_modified + errors))
+
+            bytes_transferred = self.stats['bytes_transferred']
+            archive_bytes_pruned = self.stats['archive_bytes_pruned']
+
+            total_seconds = self.ts_delta()[0]
+            if total_seconds > 0 and bytes_transferred > 0:
+                speed = bytes_transferred / total_seconds
+                rate_str = f" ({file_core.format_bytes(speed)}/s)"
+            else:
+                rate_str = ""
+
+            free_space_str = ""
+            target = self._target_drive
+            if target and os.path.exists(target):
+                try:
+                    curr_usage = shutil.disk_usage(target)
+                    if self.initial_disk_usage:
+                        init_free = self.initial_disk_usage.free
+                        init_used = self.initial_disk_usage.used
+                        curr_free = curr_usage.free
+                        curr_used = curr_usage.used
+                        total = curr_usage.total
+
+                        delta_free = curr_free - init_free
+                        if delta_free >= 0:
+                            delta_str = f"+{file_core.format_bytes(delta_free)} net freed"
+                        else:
+                            delta_str = f"-{file_core.format_bytes(abs(delta_free))} net consumed"
+
+                        free_space_str = (
+                            f"TargetSpaceBefore: {file_core.format_bytes(init_free)} free ({file_core.format_bytes(init_used)} used of {file_core.format_bytes(total)}){nl}"
+                            f"TargetSpaceAfter:  {file_core.format_bytes(curr_free)} free ({file_core.format_bytes(curr_used)} used of {file_core.format_bytes(total)}){nl}"
+                            f"TargetSpaceDelta:  {delta_str}{nl}"
+                            f"TargetFreeSpace:   {file_core.format_bytes(curr_free)} of {file_core.format_bytes(total)} free{nl}"
+                        )
+                    else:
+                        free_space_str = f"TargetFreeSpace: {file_core.format_bytes(curr_usage.free)} of {file_core.format_bytes(curr_usage.total)} free{nl}"
+                except OSError:
+                    pass
+
             stats_text = (
                 f"{nl}--- Backup Sync Statistics ---{nl}"
                 f"{file_core.backup_ts()}{nl}"
-                f"FilesChecked: {self.stats['files_checked']}{nl}"
-                f"FilesUpdated: {self.stats['files_updated']}{nl}"
+                f"FilesChecked: {files_checked}{nl}"
+                f"FilesUnchanged: {files_unchanged}{nl}"
+                f"FilesCreated: {files_created}{nl}"
+                f"FilesModified: {files_modified}{nl}"
+                f"FilesUpdated: {files_updated}{nl}"
+                f"MetadataUpdated: {self.stats['metadata_updated']}{nl}"
                 f"FilesDeleted: {self.stats['files_deleted']}{nl}"
+                f"FilesArchived: {self.stats['files_archived']}{nl}"
                 f"DirectoriesChecked: {self.stats['directories_checked']}{nl}"
                 f"DirectoriesCreated: {self.stats['directories_created']}{nl}"
                 f"DirectoriesDeleted: {self.stats['directories_deleted']}{nl}"
-                f"Errors Encountered: {self.stats['errors']}{nl}"
+                f"DirectoriesArchived: {self.stats['directories_archived']}{nl}"
+                f"ArchiveFilesPruned: {self.stats['archive_files_pruned']}{nl}"
+                f"ArchiveDirectoriesPruned: {self.stats['archive_directories_pruned']}{nl}"
+                f"DataTransferred: {file_core.format_bytes(bytes_transferred)}{rate_str}{nl}"
+                f"ArchiveSpaceReclaimed: {file_core.format_bytes(archive_bytes_pruned)} reclaimed{nl}"
+                f"{free_space_str}"
+                f"Errors Encountered: {errors}{nl}"
                 f"Total Time: {self.ts_delta_string()}{nl}{nl}"
             )
 
@@ -304,6 +474,7 @@ class Synchronizer:
             return False, None
 
         if self.dry_run:
+            protocol.inc_stat('files_archived')
             protocol.add_protocol_entry(f'[DRY-RUN] Would archive file: {backup_file}')
             return True, None
 
@@ -326,6 +497,7 @@ class Synchronizer:
 
             file_core.remove_readonly(backup_file)
             shutil.move(backup_file, archiv_file)
+            protocol.inc_stat('files_archived')
             protocol.add_protocol_entry(f'archived (moved) file {backup_file} -> {archiv_file}')
             return True, archiv_file
         except FileNotFoundError:
@@ -340,6 +512,7 @@ class Synchronizer:
             return False, None
 
         if self.dry_run:
+            protocol.inc_stat('directories_archived')
             protocol.add_protocol_entry(f'[DRY-RUN] Would archive directory tree: {backup_directory}')
             return True, None
 
@@ -362,6 +535,7 @@ class Synchronizer:
 
             file_core.remove_readonly(backup_directory)
             shutil.move(backup_directory, archiv_dir)
+            protocol.inc_stat('directories_archived')
             protocol.add_protocol_entry(f'archived (moved) directory tree {backup_directory} -> {archiv_dir}')
             return True, archiv_dir
         except FileNotFoundError:
@@ -387,15 +561,28 @@ class Synchronizer:
                 return
 
             if different:
+                file_size = 0
+                try:
+                    file_size = os.path.getsize(origin_file)
+                except OSError:
+                    pass
+
+                exists_in_backup = file_core.path_exists(backup_file)
+
                 if self.dry_run:
                     protocol.inc_stat('files_updated')
+                    if exists_in_backup:
+                        protocol.inc_stat('files_modified')
+                    else:
+                        protocol.inc_stat('files_created')
+                    protocol.inc_stat('bytes_transferred', file_size)
                     protocol.add_protocol_entry(f'[DRY-RUN] Would copy {origin_file} -> {backup_file}')
                     return
 
                 archived = False
                 archived_backup_location = None
 
-                if file_core.path_exists(backup_file) and archiv_path:
+                if exists_in_backup and archiv_path:
                     archived, archived_backup_location = self.archive_file(backup_file, backup_path, archiv_path, protocol)
                     if not archived:
                         protocol.add_protocol_entry(f'ABORT OVERWRITE: Could not archive {backup_file}')
@@ -406,6 +593,11 @@ class Synchronizer:
                 try:
                     file_core.copy_file(origin_file, backup_file, verify_hash=should_verify)
                     protocol.inc_stat('files_updated')
+                    if exists_in_backup:
+                        protocol.inc_stat('files_modified')
+                    else:
+                        protocol.inc_stat('files_created')
+                    protocol.inc_stat('bytes_transferred', file_size)
                     protocol.add_protocol_entry(f'copy file {origin_file} to: {backup_file}')
                 except Exception as copy_err:
                     if archived and archived_backup_location and file_core.path_exists(archived_backup_location):
@@ -431,6 +623,7 @@ class Synchronizer:
                 if not self.dry_run:
                     try:
                         if file_core.sync_metadata(origin_file, backup_file):
+                            protocol.inc_stat('metadata_updated')
                             protocol.add_protocol_entry(f'sync metadata for: {backup_file}')
                     except OSError as meta_err:
                         protocol.inc_stat('errors')
@@ -647,13 +840,18 @@ def prune_archive(archiv_path: str, retention_days: int, protocol: SyncProtocol,
             try:
                 stat_info = os.stat(f_path)
                 if stat_info.st_mtime < cutoff_time:
+                    f_size = stat_info.st_size
                     if dry_run:
                         protocol.add_protocol_entry(f'[DRY-RUN] Would prune expired archive file ({retention_days}d limit): {f_path}')
                         files_pruned += 1
+                        protocol.inc_stat('archive_files_pruned')
+                        protocol.inc_stat('archive_bytes_pruned', f_size)
                     else:
                         if file_core.remove_file(f_path):
                             protocol.add_protocol_entry(f'Pruned expired archive file: {f_path}')
                             files_pruned += 1
+                            protocol.inc_stat('archive_files_pruned')
+                            protocol.inc_stat('archive_bytes_pruned', f_size)
             except OSError:
                 pass
 
@@ -665,9 +863,11 @@ def prune_archive(archiv_path: str, retention_days: int, protocol: SyncProtocol,
                     if dry_run:
                         protocol.add_protocol_entry(f'[DRY-RUN] Would remove empty archive folder: {d_path}')
                         dirs_pruned += 1
+                        protocol.inc_stat('archive_directories_pruned')
                     else:
                         if file_core.remove_directory(d_path):
                             dirs_pruned += 1
+                            protocol.inc_stat('archive_directories_pruned')
             except OSError:
                 pass
 
