@@ -16,6 +16,7 @@ Designed around the principle of **zero data loss**, this engine replaces destru
 - [🚀 Quick Start](#-quick-start)
 - [⚙️ Configuration Guide (`jobs.json`)](#-configuration-guide-jobsjson)
 - [🖥️ Command-Line Interface (CLI)](#-command-line-interface-cli)
+- [📊 Protocol & Statistics Example](#-protocol--statistics-example)
 - [🔒 Data Safety & Integrity Invariants](#-data-safety--integrity-invariants)
 - [⚠️ Known Limitations & Edge Cases](#-known-limitations--edge-cases)
 - [📤 Exit Codes](#-exit-codes)
@@ -143,6 +144,39 @@ python main_backup.py [OPTIONS]
 | `--no-verify` | Disable inline streaming SHA-256 verification |
 | `--retention-days N` | Prune archived versions older than N days from `recyclebin` (overrides jobs.json) |
 | `--case-sensitive-excludes` | Enforce case-sensitive matching for exclude patterns (overrides jobs.json) |
+
+---
+
+## 📊 Protocol & Statistics Example
+
+Every execution records an append-only audit trail to `protocol.txt` and outputs a comprehensive real-time statistics block upon completion:
+
+```text
+--- Backup Sync Statistics ---
+#21-09-2026-16:38:00
+FilesChecked:             1,250
+FilesUnchanged:           1,235
+FilesCreated:                 8
+FilesModified:                7
+FilesUpdated:                15
+MetadataUpdated:              2
+FilesDeleted:                 3
+FilesArchived:               10
+DirectoriesChecked:         140
+DirectoriesCreated:           1
+DirectoriesDeleted:           0
+DirectoriesArchived:          0
+ArchiveFilesPruned:          45
+ArchiveDirectoriesPruned:     4
+DataTransferred:         1.42 GB (42.50 MB/s)
+ArchiveSpaceReclaimed:   5.80 GB reclaimed
+TargetSpaceBefore:       179.80 GB free (320.20 GB used of 500.00 GB)
+TargetSpaceAfter:        184.20 GB free (315.80 GB used of 500.00 GB)
+TargetSpaceDelta:        +4.40 GB net freed
+TargetFreeSpace:         184.20 GB of 500.00 GB free
+Errors Encountered:           0
+Total Time:              33.40 seconds (0h 0m 33.40s)
+```
 
 ---
 
