@@ -5,10 +5,12 @@ jobs.json
 protocol.txt
 bkupts.txt
 
-# Internal audit reports
+# Internal audit reports and developer prompts
 code.audit.md
 *.audit.md
 code_formatting_rules.md
+dev.prompt.md
+*.prompt.md
 
 # Python bytecode and cache
 __pycache__/
