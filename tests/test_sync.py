@@ -1390,6 +1390,71 @@ class TestSyncLogic(unittest.TestCase):
         file_core.sync_directory(self.base)
         file_core.sync_directory(None)
 
+    def test_synchronizer_heartbeat_invoked(self):
+        heartbeat_calls = []
+
+        def on_heartbeat():
+            heartbeat_calls.append(time.time())
+
+        # Test with interval 0.0 to guarantee invocation on each progress point
+        syncer = Synchronizer(max_workers=2, heartbeat_callback=on_heartbeat, heartbeat_interval=0.0)
+        protocol = SyncProtocol(use_stdout=False)
+
+        # Create source files
+        f1 = os.path.join(self.source, "hb1.txt")
+        f2 = os.path.join(self.source, "hb2.txt")
+        with open(f1, "w", encoding="utf-8") as f:
+            f.write("test1")
+        with open(f2, "w", encoding="utf-8") as f:
+            f.write("test2")
+
+        syncer.synchronize(self.source, self.target, doSync=True, archiv_path=self.archive, protocol=protocol)
+        self.assertGreater(len(heartbeat_calls), 0)
+
+    def test_synchronizer_heartbeat_lock_loss_abort(self):
+        # Simulate lock stolen/lost during synchronization: heartbeat callback raises RuntimeError
+        def stolen_lock_heartbeat():
+            raise RuntimeError("Drive lock stolen: Lock file '.backup.lock' was taken over by another PID!")
+
+        syncer = Synchronizer(max_workers=2, heartbeat_callback=stolen_lock_heartbeat, heartbeat_interval=0.0)
+        protocol = SyncProtocol(use_stdout=False)
+
+        f1 = os.path.join(self.source, "hb_fail.txt")
+        with open(f1, "w", encoding="utf-8") as f:
+            f.write("fail_data")
+
+        with self.assertRaises(RuntimeError) as ctx:
+            syncer.synchronize(self.source, self.target, doSync=True, archiv_path=self.archive, protocol=protocol)
+        self.assertIn("Drive lock stolen", str(ctx.exception))
+
+    def test_validate_jobs_missing_source_directory(self):
+        # Non-existent source directory must be rejected by validate_jobs
+        non_existent_source = os.path.join(self.base, "does_not_exist_source_dir")
+        jobs = [{"source": non_existent_source, "target_dir": "target_a"}]
+        valid = validate_jobs(jobs, self.base)
+        self.assertEqual(len(valid), 0)
+
+    def test_prune_expired_archives_darwin_case_folding(self):
+        # Test that on darwin, case-insensitive folding prevents duplicate prune runs
+        import unittest.mock
+        protocol = SyncProtocol(use_stdout=False)
+        archived_base = os.path.join(self.base, "archive_case")
+        tgt1 = os.path.join(archived_base, "JobA")
+        tgt2 = os.path.join(archived_base, "joba")
+        os.makedirs(tgt1, exist_ok=True)
+
+        jobs = [
+            {"source": self.source, "target_dir": "JobA", "retention_days": 30},
+            {"source": self.source, "target_dir": "joba", "retention_days": 30}
+        ]
+        with unittest.mock.patch("sys.platform", "darwin"):
+            with unittest.mock.patch("main_backup.prune_archive") as mock_prune:
+                mock_prune.return_value = PruneResult(0, 0)
+                prune_expired_archives(jobs, archived_base, protocol)
+                # On darwin, JobA and joba normalize to the same lowercase key, so prune_archive must be called only ONCE
+                self.assertEqual(mock_prune.call_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
+

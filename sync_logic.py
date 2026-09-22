@@ -23,7 +23,7 @@ import time
 import uuid
 from collections import Counter
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
@@ -463,11 +463,39 @@ class ArchiveResult(tuple):
 
 
 class Synchronizer:
-    def __init__(self, max_workers: int = 1, dry_run: bool = False, verify_copy: bool = True, case_sensitive_excludes: bool = False):
+    def __init__(
+        self,
+        max_workers: int = 1,
+        dry_run: bool = False,
+        verify_copy: bool = True,
+        case_sensitive_excludes: bool = False,
+        heartbeat_callback: Optional[Callable[[], None]] = None,
+        heartbeat_interval: float = 15.0
+    ):
         self.max_workers = max(1, max_workers)
         self.dry_run = dry_run
         self.verify_copy = verify_copy
         self.case_sensitive_excludes = case_sensitive_excludes
+        self.heartbeat_callback = heartbeat_callback
+        self.heartbeat_interval = heartbeat_interval
+        self._last_heartbeat = 0.0
+        self._heartbeat_lock = threading.Lock()
+
+    def trigger_heartbeat(self, force: bool = False) -> None:
+        """
+        Invokes the heartbeat callback if configured and the interval has elapsed.
+        If force is True, invokes unconditionally.
+        Propagates any exceptions (e.g. RuntimeError if drive lock was lost or stolen) immediately.
+        """
+        if not self.heartbeat_callback:
+            return
+        now = time.monotonic()
+        if force or (now - self._last_heartbeat >= self.heartbeat_interval):
+            with self._heartbeat_lock:
+                if force or (now - self._last_heartbeat >= self.heartbeat_interval):
+                    self._last_heartbeat = now
+                    self.heartbeat_callback()
+
 
     def archive_file(
         self,
@@ -747,6 +775,7 @@ class Synchronizer:
         source_rel_files: Set[str] = set()
 
         for root, dirs, files in os.walk(source_path, topdown=True):
+            self.trigger_heartbeat()
             rel_root = os.path.relpath(root, source_path)
             rel_root_clean = "" if rel_root == "." else rel_root
 
@@ -807,6 +836,20 @@ class Synchronizer:
                         except TypeError:
                             executor.shutdown(wait=False)
                         raise fbe
+                    except Exception:
+                        try:
+                            executor.shutdown(wait=False, cancel_futures=True)
+                        except TypeError:
+                            executor.shutdown(wait=False)
+                        raise
+                    try:
+                        self.trigger_heartbeat()
+                    except Exception:
+                        try:
+                            executor.shutdown(wait=False, cancel_futures=True)
+                        except TypeError:
+                            executor.shutdown(wait=False)
+                        raise
             except (KeyboardInterrupt, SystemExit):
                 try:
                     executor.shutdown(wait=True, cancel_futures=True)
@@ -818,7 +861,9 @@ class Synchronizer:
         else:
             for orig, bk in file_tasks:
                 self._sync_single_file(orig, bk, backup_path, archiv_path, protocol, force_hash)
+                self.trigger_heartbeat()
 
+        self.trigger_heartbeat(force=True)
         return source_rel_files
 
     def prune(self, source_path: str, backup_path: str, archiv_path: Optional[str], protocol: SyncProtocol, excludes: Optional[List[str]] = None, known_source_files: Optional[Set[str]] = None) -> None:
@@ -832,6 +877,7 @@ class Synchronizer:
         known_sources_lower: Dict[str, str] = {s.lower(): s for s in known_sources}
 
         for root, dirs, files in os.walk(backup_path, topdown=True):
+            self.trigger_heartbeat()
             rel_root = os.path.relpath(root, backup_path)
             rel_root_clean = "" if rel_root == "." else rel_root
 
@@ -908,6 +954,8 @@ class Synchronizer:
                                 protocol.inc_stat('files_deleted')
                                 protocol.add_protocol_entry(f'remove file {backup_file}')
 
+        self.trigger_heartbeat(force=True)
+
     def synchronize(self, origin_path: str, backup_path: str, doSync: bool, archiv_path: Optional[str], protocol: SyncProtocol, excludes: Optional[List[str]] = None, force_hash: bool = False) -> bool:
         clear_case_cache()
         protocol.set_start_ts()
@@ -933,6 +981,9 @@ class Synchronizer:
             raise
         except (KeyboardInterrupt, SystemExit):
             protocol.add_protocol_entry('synchronize aborted by user signal.')
+            raise
+        except RuntimeError as r_err:
+            protocol.add_protocol_entry(f'CRITICAL RUNTIME ERROR: {r_err}')
             raise
         except Exception as err:
             protocol.add_protocol_entry(f'synchronize fatal error: {err}')
@@ -965,7 +1016,13 @@ class PruneResult(int):
         return self.files + self.dirs
 
 
-def prune_archive(archiv_path: str, retention_days: int, protocol: SyncProtocol, dry_run: bool = False) -> PruneResult:
+def prune_archive(
+    archiv_path: str,
+    retention_days: int,
+    protocol: SyncProtocol,
+    dry_run: bool = False,
+    heartbeat_callback: Optional[Callable[[], None]] = None
+) -> PruneResult:
     """
     Prunes archived files and empty directory trees in archiv_path that are older than retention_days.
     Returns a PruneResult (int subclass) representing the number of pruned files, with .dirs and .total attributes.
@@ -978,8 +1035,12 @@ def prune_archive(archiv_path: str, retention_days: int, protocol: SyncProtocol,
     dirs_pruned = 0
     protocol.add_protocol_entry(f'#retention-check {archiv_path} (limit: {retention_days} days)')
 
+    last_hb = time.monotonic()
     # Topdown=False ensures child files and subdirs are removed before their parent directories
     for root, dirs, files in os.walk(archiv_path, topdown=False):
+        if heartbeat_callback and (time.monotonic() - last_hb >= 15.0):
+            last_hb = time.monotonic()
+            heartbeat_callback()
         for f in files:
             f_path = os.path.join(root, f)
             try:
@@ -1018,4 +1079,6 @@ def prune_archive(archiv_path: str, retention_days: int, protocol: SyncProtocol,
 
     if files_pruned > 0 or dirs_pruned > 0:
         protocol.add_protocol_entry(f'Retention prune completed: {files_pruned} file(s) and {dirs_pruned} empty folder(s) purged.')
+    if heartbeat_callback:
+        heartbeat_callback()
     return PruneResult(files_pruned, dirs_pruned)

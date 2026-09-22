@@ -24,7 +24,7 @@ import uuid
 import unicodedata
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
@@ -366,6 +366,10 @@ def validate_jobs(jobs: List[Dict[str, Any]], base_drive: str) -> List[Dict[str,
             print(f"WARNING: Skipping job entry at index {idx} with empty 'source' or 'target_dir'.")
             continue
 
+        if not os.path.isdir(raw_source):
+            print(f"ERROR: Job {idx} source directory '{raw_source}' does not exist or is not a directory. Skipping.")
+            continue
+
         target_dir = os.path.normpath(raw_target)
 
         # Reject absolute paths, drive-scoped paths (e.g. C:foo), UNC paths, or directory traversal
@@ -417,7 +421,8 @@ def prune_expired_archives(
     archived_base: str,
     protocol: SyncProtocol,
     dry_run: bool = False,
-    retention_override: Optional[int] = None
+    retention_override: Optional[int] = None,
+    heartbeat_callback: Optional[Callable[[], None]] = None
 ) -> int:
     """
     Scans and prunes expired files and empty directories in the recyclebin/archive
@@ -432,14 +437,20 @@ def prune_expired_archives(
         if retention and retention > 0 and archive_target and os.path.exists(archive_target):
             target_key = (
                 os.path.normpath(archive_target).lower()
-                if sys.platform == "win32"
+                if sys.platform in ("win32", "darwin")
                 else os.path.normpath(archive_target),
                 retention
             )
             if target_key in pruned_targets:
                 continue
             pruned_targets.add(target_key)
-            pruned = prune_archive(archive_target, retention, protocol, dry_run=dry_run)
+            pruned = prune_archive(
+                archive_target,
+                retention,
+                protocol,
+                dry_run=dry_run,
+                heartbeat_callback=heartbeat_callback
+            )
             total_pruned_files += pruned.files
             if pruned.files > 0 or pruned.dirs > 0:
                 action_str = "[DRY-RUN] Would prune" if dry_run else "Pruned"
@@ -519,7 +530,8 @@ def main() -> None:
                         archived_base=archived_base,
                         protocol=protocol,
                         dry_run=args.dry_run,
-                        retention_override=args.retention_days
+                        retention_override=args.retention_days,
+                        heartbeat_callback=lock_manager.touch
                     )
 
                     for job in backup_jobs:
@@ -543,7 +555,8 @@ def main() -> None:
                             max_workers=max_workers,
                             dry_run=args.dry_run,
                             verify_copy=verify_copy,
-                            case_sensitive_excludes=case_sensitive
+                            case_sensitive_excludes=case_sensitive,
+                            heartbeat_callback=lock_manager.touch
                         )
 
                         synchronizer.synchronize(
@@ -560,6 +573,9 @@ def main() -> None:
                 except file_core.FatalBackupError as fbe:
                     fatal_error = True
                     print(f"\nFATAL I/O ERROR: {fbe}")
+                except RuntimeError as re:
+                    fatal_error = True
+                    print(f"\nCRITICAL RUNTIME ERROR: {re}")
                 finally:
                     protocol.set_stop_ts()
                     protocol.write_statistics()
