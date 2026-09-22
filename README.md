@@ -3,7 +3,7 @@
 A production-grade, dependency-free backup and directory synchronization suite written in pure Python for **Windows**, **Linux**, and **macOS**.  
 Designed around the principle of **zero data loss**, this engine replaces destructive synchronization with non-destructive versioned archiving, atomic write swaps, streaming checksum validation, and strict drive-level concurrency controls.
 
-**Version:** 1.2.5  
+**Version:** 1.3.0  
 **License:** MIT  
 **Requirements:** Python ≥ 3.8 (standard library only)
 
@@ -144,6 +144,8 @@ python main_backup.py [OPTIONS]
 | `--no-verify` | Disable inline streaming SHA-256 verification |
 | `--retention-days N` | Prune archived versions older than N days from `recyclebin` (overrides jobs.json) |
 | `--case-sensitive-excludes` | Enforce case-sensitive matching for exclude patterns (overrides jobs.json) |
+| `--force-unlock` | Forcefully break and remove any existing drive lock (use with caution) |
+| `--lock-timeout SECONDS` | Override stale lock timeout in seconds (default: 7200 / 2 hours) |
 
 ---
 
@@ -174,6 +176,7 @@ TargetSpaceBefore:       179.80 GB free (320.20 GB used of 500.00 GB)
 TargetSpaceAfter:        184.20 GB free (315.80 GB used of 500.00 GB)
 TargetSpaceDelta:        +4.40 GB net freed
 TargetFreeSpace:         184.20 GB of 500.00 GB free
+SymlinksSkipped:              0
 Errors Encountered:           0
 Total Time:              33.40 seconds (0h 0m 33.40s)
 ```
@@ -181,15 +184,16 @@ Total Time:              33.40 seconds (0h 0m 33.40s)
 ---
 
 ## 🔒 Data Safety & Integrity Invariants
-* **Copy-before-Prune** – the backup transfer always finishes before any prune analysis or removal starts.
-* **Archive-before-Overwrite / Delete** – an obsolete or modified file is only overwritten or removed after being safely copied to `recyclebin`.
+* **Copy-before-Prune** – the backup transfer always finishes completely before any prune analysis or orphan removal starts.
+* **Zero-Gap Overwrite Protection (Hardlink-First & Copy-First)** – before replacing an existing backup file, it is linked (`os.link` on NTFS/ext4/APFS/btrfs) or duplicated (`shutil.copy2` on FAT32/exFAT) into the versioned archive. The original file remains continuously in place at its target path until atomic `os.replace` swaps it with the validated new version. There is zero window of non-existence.
+* **Fatal Storage Abort Guarantee (`FatalBackupError`)** – if the backup medium runs out of disk space (`errno.ENOSPC` / WinError 112) or becomes read-only (`errno.EROFS`), the engine immediately halts worker threads (`cancel_futures=True`) and skips subsequent pruning, ensuring valid existing backup data is never deleted under disk pressure.
 * **Streaming Verification** – when `verify_copy=true`, SHA-256 digests of source and target are computed simultaneously during block streaming.
 * **Atomic Replace** – staged writes happen via unique temporary files in the destination directory, finalized via atomic `os.replace`.
 * **Pre-Backup Storage Reclamation** – expired archive files and empty directories in `recyclebin` are pruned *before* file copying starts, ensuring maximum free capacity and preventing out-of-disk-space errors.
 * **Path-Traversal Barrier** – all configured job destinations are strictly bounded to the backup drive root via `os.path.commonpath`.
-* **Stale-Temp Cleanup** – orphaned staging files from aborted previous processes are swept on orchestrator startup.
-* **Drive Lock** – exclusive medium lock prevents duplicate process execution; locks are freed strictly after ownership validation.
-* **Stale-Lock Recovery** – abandoned locks from dead PIDs or processes older than 2 hours are recycled safely.
+* **Automatic Crash Recovery** – orphaned staging files (`tmp_sync_*`, `tmp_rollback_*`) older than 30 minutes and empty lock files older than 10 seconds are swept on orchestrator startup.
+* **Multi-Host Drive Lock** – exclusive medium lock with `PID`, `Hostname`, `UUID`, and timestamp prevents concurrent runs across different machines; locks are freed strictly after ownership validation.
+* **Stale-Lock Recovery & Force-Unlock** – abandoned locks from dead local PIDs or foreign hosts older than 2 hours (configurable via `--lock-timeout`) are recycled safely. Administrators can use `--force-unlock` for immediate override.
 
 ---
 
@@ -199,18 +203,24 @@ Total Time:              33.40 seconds (0h 0m 33.40s)
 | --- | --- | --- |
 | **Network filesystems (SMB/NFS)** | Mandatory locking may be unavailable. The engine falls back to an advisory lock with explicit warnings. | Prefer local / USB drives for critical data. Avoid starting concurrent jobs on the same network share. |
 | **Directory Pruning** | When an entire directory subtree no longer exists at source, the orphan tree is moved atomically to the versioned archive (`recyclebin`) with timestamp and UUID token. | Reversible zero-data-loss behavior; directory structures and files remain fully preserved in archive. |
-| **Symlinks / Junctions** | Symbolic links and Windows junction points are **skipped** to avoid infinite traversal loops. | Keep mission-critical data in regular directory trees. |
+| **Symlinks / Junctions** | Symbolic links and Windows junction points are **skipped** to avoid infinite traversal loops. Tracked and reported in `SymlinksSkipped`. | Keep mission-critical data in regular directory trees. |
 | **Special File Attributes** | Hardlinks, sparse files, ADS, POSIX ACLs, and extended attributes are not preserved. | Use archive formats (e.g. tar/squashfs) if file system metadata beyond mtime/permissions is required. |
 | **Memory Footprint** | All relative paths per job are cataloged in an in-memory set to maximize I/O throughput. | Recommended for datasets up to ~2-3 million files per job. |
+| **Copy-First on FAT32/exFAT** | On filesystems without hardlink support (`os.link`), the engine duplicates files (`shutil.copy2`) into the archive before overwriting. During transfer of large files, up to ~2× the file size of free disk space is temporarily needed until the old target is replaced. | Format backup media with NTFS (Windows), ext4/btrfs (Linux), or APFS (macOS) whenever possible to enable instantaneous, zero-storage Hardlink-First archiving. |
 
 ---
 
 ## 📤 Exit Codes
 
-| Code | Meaning |
-| --- | --- |
-| `0` | Success (or dry-run completed cleanly) |
-| `1` | Configuration error, missing backup medium, lock conflict, or execution error |
+The orchestrator returns distinct exit codes for reliable integration with cron, systemd, Nagios, Zabbix, and monitoring alerts:
+
+| Code | Status | Meaning & Recommended Action |
+| --- | --- | --- |
+| `0` | **Success** | All jobs completed cleanly with 0 errors (or dry-run finished). |
+| `1` | **Configuration / Drive Error** | `jobs.json` missing/invalid, CLI syntax error, or backup drive marker (`.backup_id`) not found. |
+| `2` | **Drive Lock Conflict** | The target drive is currently locked by an active process or another host. If a previous run crashed, use `--force-unlock`. |
+| `3` | **Fatal Storage Error** | Disk full (`ENOSPC` / WinError 112) or read-only volume (`EROFS`). Synchronisation was aborted immediately and pruning was skipped to prevent data loss. Alert admin immediately. |
+| `4` | **Partial Errors** | Backup completed, but one or more individual files encountered non-fatal read/write/permission errors. Review `protocol.txt`. |
 
 ---
 
@@ -225,7 +235,7 @@ Total Time:              33.40 seconds (0h 0m 33.40s)
 ├── bkup.sh / bkup.bat   # Cross-platform convenience launchers
 ├── jobs.json            # Synchronization job definitions (user-specific, git-ignored)
 ├── jobs.json.example    # Configuration template
-├── tests/               # Automated unit & regression test suite (25 tests)
+├── tests/               # Automated unit & regression test suite (48 tests)
 │   └── test_sync.py
 ├── LICENSE              # MIT License
 └── README.md            # This file

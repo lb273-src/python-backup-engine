@@ -17,8 +17,10 @@ import json
 import os
 import platform
 import re
+import socket
 import string
 import sys
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -56,43 +58,87 @@ def is_pid_running(pid: int) -> bool:
 
 
 class BackupDriveLock:
-    STALE_LOCK_SECONDS = 7200  # 2 hours
+    DEFAULT_STALE_LOCK_SECONDS = 7200  # 2 hours
 
-    def __init__(self, drive_path: str):
+    def __init__(self, drive_path: str, stale_timeout_seconds: Optional[int] = None, force_unlock: bool = False):
         self.lock_file_path = os.path.join(drive_path, '.backup.lock')
         self.handle = None
         self._fallback_mode = False
+        self.lock_uuid = uuid.uuid4().hex
+        self.stale_timeout_seconds = (
+            stale_timeout_seconds if (stale_timeout_seconds is not None and stale_timeout_seconds > 0)
+            else self.DEFAULT_STALE_LOCK_SECONDS
+        )
+        self.force_unlock = force_unlock
 
-    def _read_lock_info(self) -> Tuple[Optional[int], Optional[float]]:
+    def _read_lock_info(self) -> Dict[str, Any]:
         if not os.path.exists(self.lock_file_path):
-            return None, None
+            return {}
         try:
-            mtime = os.path.getmtime(self.lock_file_path)
+            st = os.stat(self.lock_file_path)
+            size = st.st_size
+            mtime = st.st_mtime
             with open(self.lock_file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
-            match = re.search(r'PID:\s*(\d+)', content)
-            pid = int(match.group(1)) if match else None
-            return pid, mtime
+            pid_m = re.search(r'PID:\s*(\d+)', content)
+            host_m = re.search(r'Hostname:\s*(\S+)', content)
+            uuid_m = re.search(r'UUID:\s*(\S+)', content)
+            started_m = re.search(r'Started:\s*([^\n]+)', content)
+            return {
+                'pid': int(pid_m.group(1)) if pid_m else None,
+                'hostname': host_m.group(1) if host_m else None,
+                'uuid': uuid_m.group(1) if uuid_m else None,
+                'started': started_m.group(1) if started_m else None,
+                'mtime': mtime,
+                'size': size
+            }
         except Exception:
-            return None, None
+            return {}
 
-    def _is_stale(self, pid: Optional[int], mtime: Optional[float]) -> bool:
+    def _is_stale(self, lock_info: Dict[str, Any]) -> bool:
+        if not lock_info:
+            return True
+        mtime = lock_info.get('mtime')
         if mtime is None:
             return True
         age = datetime.now().timestamp() - mtime
-        if age > self.STALE_LOCK_SECONDS:
+
+        # Empty lock file after crash (0 bytes, older than 10 seconds):
+        if lock_info.get('size', 0) == 0:
+            return age > 10.0
+
+        current_host = socket.gethostname().lower()
+        lock_host = (lock_info.get('hostname') or "").lower()
+
+        # Multi-Host protection:
+        if lock_host and lock_host != current_host:
+            # Different machine owns the lock: never check local PID!
+            # Only declare stale if total age exceeds configured timeout.
+            return age > self.stale_timeout_seconds
+
+        # Same machine (or legacy lock without hostname):
+        if age > self.stale_timeout_seconds:
             return True
+        pid = lock_info.get('pid')
         if pid is not None and not is_pid_running(pid):
             return True
         return False
 
     def acquire(self) -> bool:
-        pid, mtime = self._read_lock_info()
-        if self._is_stale(pid, mtime):
+        if self.force_unlock:
             try:
-                os.remove(self.lock_file_path)
-            except OSError:
-                pass
+                if os.path.exists(self.lock_file_path):
+                    os.remove(self.lock_file_path)
+                    print(f"WARNING: --force-unlock specified. Cleared existing drive lock: {self.lock_file_path}")
+            except OSError as e:
+                print(f"WARNING: Could not force-remove lock: {e}")
+        else:
+            lock_info = self._read_lock_info()
+            if self._is_stale(lock_info):
+                try:
+                    os.remove(self.lock_file_path)
+                except OSError:
+                    pass
 
         try:
             flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
@@ -129,6 +175,8 @@ class BackupDriveLock:
 
             self.handle.write(
                 f"PID: {os.getpid()}\n"
+                f"Hostname: {socket.gethostname()}\n"
+                f"UUID: {self.lock_uuid}\n"
                 f"Started: {file_core.backup_ts()}\n"
                 f"Fallback: {self._fallback_mode}\n"
             )
@@ -172,17 +220,33 @@ class BackupDriveLock:
 
             try:
                 if os.path.exists(self.lock_file_path):
-                    owner_pid, _ = self._read_lock_info()
-                    if owner_pid == os.getpid():
+                    info = self._read_lock_info()
+                    if info.get('uuid'):
+                        if info.get('uuid') == self.lock_uuid:
+                            os.remove(self.lock_file_path)
+                    elif (
+                        info.get('pid') == os.getpid() and
+                        (info.get('hostname') or '').lower() == socket.gethostname().lower()
+                    ):
                         os.remove(self.lock_file_path)
             except OSError:
                 pass
 
     def __enter__(self) -> 'BackupDriveLock':
         if not self.acquire():
-            pid, _ = self._read_lock_info()
-            pid_msg = f" (PID {pid})" if pid else ""
-            raise RuntimeError(f"Backup drive is currently locked by another process{pid_msg}.")
+            info = self._read_lock_info()
+            pid = info.get('pid')
+            host = info.get('hostname')
+            started = info.get('started')
+            details = []
+            if pid:
+                details.append(f"PID {pid}")
+            if host:
+                details.append(f"host '{host}'")
+            if started:
+                details.append(f"started {started}")
+            detail_str = f" ({', '.join(details)})" if details else ""
+            raise RuntimeError(f"Backup drive is currently locked by another process{detail_str}.")
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
@@ -300,7 +364,7 @@ def validate_jobs(jobs: List[Dict[str, Any]], base_drive: str) -> List[Dict[str,
             "case_sensitive_excludes": case_sensitive_excludes,
             "force_hash": bool(job.get("force_hash", False)),
             "verify_copy": bool(job.get("verify_copy", True)),
-            "max_workers": int(job.get("max_workers", 4)),
+            "max_workers": max(1, int(job.get("max_workers", 4))),
             "retention_days": retention_days
         })
     return validated
@@ -350,6 +414,8 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--no-verify", action="store_true", help="Disable inline streaming SHA-256 verification")
     parser.add_argument("--retention-days", type=int, default=None, help="Prune archived versions older than N days from recyclebin (overrides jobs.json)")
     parser.add_argument("--case-sensitive-excludes", action="store_true", help="Enforce case-sensitive matching for exclude patterns (overrides jobs.json)")
+    parser.add_argument("--force-unlock", action="store_true", help="Forcefully break and remove any existing drive lock (use with caution)")
+    parser.add_argument("--lock-timeout", type=int, default=None, help="Override stale lock timeout in seconds (default: 7200 / 2 hours)")
     return parser.parse_args()
 
 
@@ -368,7 +434,13 @@ def main() -> None:
 
     print(f"Backup Drive '{bdrive}' detected. Starting Backup Jobs.")
 
-    lock_manager = NoOpLock() if args.dry_run else BackupDriveLock(bdrive)
+    lock_manager = NoOpLock() if args.dry_run else BackupDriveLock(
+        bdrive,
+        stale_timeout_seconds=args.lock_timeout,
+        force_unlock=args.force_unlock
+    )
+    fatal_error = False
+    run_errors = 0
 
     try:
         with lock_manager:
@@ -409,7 +481,8 @@ def main() -> None:
                         job_excludes = job["excludes"]
                         force_hash = job["force_hash"]
                         verify_copy = False if args.no_verify else job["verify_copy"]
-                        max_workers = args.workers or job["max_workers"]
+                        user_workers = max(1, args.workers) if args.workers is not None else None
+                        max_workers = user_workers or job["max_workers"]
 
                         print(f"\n--- Starting Job: {source} -> {bk_target} (Workers: {max_workers}) ---")
 
@@ -435,14 +508,18 @@ def main() -> None:
                         )
                 except KeyboardInterrupt:
                     print("\nBackup aborted by user signal.")
+                except file_core.FatalBackupError as fbe:
+                    fatal_error = True
+                    print(f"\nFATAL I/O ERROR: {fbe}")
                 finally:
                     protocol.set_stop_ts()
                     protocol.write_statistics()
+                    run_errors = protocol.errors
                     sys.stdout.flush()
                     print(f"\nProtocol successfully written to {protocol_file}")
                     print(f"Completed in {protocol.ts_delta_string()} with {protocol.errors} errors.")
 
-            if not args.dry_run:
+            if not args.dry_run and not fatal_error:
                 try:
                     ts_file = os.path.join(bdrive, 'bkupts.txt')
                     with open(ts_file, 'w', encoding='utf-8') as f:
@@ -452,7 +529,13 @@ def main() -> None:
 
     except RuntimeError as lock_err:
         print(f"ERROR: {lock_err}")
-        sys.exit(1)
+        sys.exit(2)
+
+    if fatal_error:
+        sys.exit(3)
+    if run_errors > 0:
+        sys.exit(4)
+    sys.exit(0)
 
 
 if __name__ == "__main__":

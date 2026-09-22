@@ -11,6 +11,7 @@ Python Backup & Synchronization Suite
 """
 
 from .file_core import (
+    FatalBackupError,
     backup_ts,
     check_paths,
     cleanup_stale_temp_files,
@@ -57,6 +58,7 @@ from .main_backup import (
 )
 from .sync_logic import (
     DEFAULT_EXCLUDES,
+    ArchiveResult,
     PruneResult,
     Synchronizer,
     SyncProtocol,
@@ -66,7 +68,7 @@ from .sync_logic import (
     prune_archive,
 )
 
-__version__ = "1.2.5"
+__version__ = "1.3.0"
 __author__ = "Dipl.-Ing. (FH) Ludger Bröring"
 __license__ = "MIT"
 
@@ -74,6 +76,7 @@ __all__ = [
     # Engine & Protocol
     "Synchronizer",
     "SyncProtocol",
+    "ArchiveResult",
     "PruneResult",
     "DEFAULT_EXCLUDES",
     "build_ignore_patterns",
@@ -81,6 +84,7 @@ __all__ = [
     "normalize_rel_path",
     "prune_archive",
     # Core File Operations
+    "FatalBackupError",
     "check_paths",
     "cleanup_stale_temp_files",
     "copy_file",

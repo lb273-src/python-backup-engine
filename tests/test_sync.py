@@ -12,7 +12,9 @@ Verifies:
 8. O(1) archive file collision resolution with microsecond & UUID precision.
 """
 
+import errno
 import os
+import shutil
 import tempfile
 import time
 import unittest
@@ -28,10 +30,11 @@ if SYNC_DIR not in sys.path:
     sys.path.insert(0, SYNC_DIR)
 
 import file_core
-try:
-    import sync
-except ModuleNotFoundError:
-    import importlib.util
+import importlib.util
+
+if "sync" in sys.modules:
+    sync = sys.modules["sync"]
+else:
     spec = importlib.util.spec_from_file_location(
         "sync",
         os.path.join(SYNC_DIR, "__init__.py"),
@@ -42,8 +45,9 @@ except ModuleNotFoundError:
         sys.modules["sync"] = sync
         spec.loader.exec_module(sync)
     else:
-        raise
+        raise ImportError(f"Could not load package 'sync' from {SYNC_DIR}")
 from sync_logic import (
+    ArchiveResult,
     PruneResult,
     SyncProtocol,
     Synchronizer,
@@ -51,8 +55,11 @@ from sync_logic import (
     build_ignore_patterns,
     is_ignored,
     prune_archive,
+    clear_case_cache,
+    _exists_case_insensitive,
+    _listdir_lower_map,
 )
-from main_backup import validate_jobs, prune_expired_archives
+from main_backup import validate_jobs, prune_expired_archives, BackupDriveLock
 
 
 class TestFileCore(unittest.TestCase):
@@ -90,6 +97,8 @@ class TestFileCore(unittest.TestCase):
         self.assertTrue(hasattr(sync, "checkPaths"))
         self.assertTrue(hasattr(sync, "is_symlink"))
         self.assertTrue(hasattr(sync, "PruneResult"))
+        self.assertTrue(hasattr(sync, "ArchiveResult"))
+        self.assertTrue(hasattr(sync, "FatalBackupError"))
         self.assertTrue(hasattr(sync, "prune_expired_archives"))
         self.assertTrue(hasattr(sync, "format_bytes"))
         self.assertTrue(hasattr(sync, "formatBytes"))
@@ -235,6 +244,96 @@ class TestSyncLogic(unittest.TestCase):
             self.assertIn("Testing log entry 2", content)
             self.assertIn("FilesChecked: 5", content)
             self.assertIn("FilesUpdated: 2", content)
+
+    def test_sync_protocol_dynamic_properties(self):
+        protocol = SyncProtocol(use_stdout=False)
+
+        # Default values in STAT_FIELDS should return 0
+        self.assertEqual(protocol.files_checked, 0)
+        self.assertEqual(protocol.directories_checked, 0)
+        self.assertEqual(protocol.symlinks_skipped, 0)
+        self.assertEqual(protocol.errors, 0)
+
+        # In-place addition (+=) routed through __getattr__ and __setattr__
+        protocol.files_checked += 10
+        self.assertEqual(protocol.files_checked, 10)
+        self.assertEqual(protocol.get_stat("files_checked"), 10)
+
+        # Direct assignment
+        protocol.directories_checked = 3
+        self.assertEqual(protocol.directories_checked, 3)
+
+        # set_stat helper
+        protocol.set_stat("symlinks_skipped", 7)
+        self.assertEqual(protocol.symlinks_skipped, 7)
+        self.assertEqual(protocol.get_stat("symlinks_skipped"), 7)
+
+        # Explicit typed property 'errors'
+        protocol.errors += 2
+        self.assertEqual(protocol.errors, 2)
+        self.assertEqual(protocol.get_stat("errors"), 2)
+
+        # Typo protection: assigning to unknown non-stat attribute raises AttributeError
+        with self.assertRaises(AttributeError):
+            protocol.files_cheked = 5  # Intentional typo
+
+        with self.assertRaises(AttributeError):
+            protocol.unknown_custom_attr = "val"
+
+        # Allowed instance attribute assignment works normally
+        protocol.log_file = "custom.log"
+        self.assertEqual(protocol.log_file, "custom.log")
+        self.assertNotIn("log_file", protocol.stats)
+
+        # Setting private attribute works without polluting stats
+        protocol._internal_debug_flag = True
+        self.assertTrue(protocol._internal_debug_flag)
+        self.assertNotIn("_internal_debug_flag", protocol.stats)
+
+        # Non-existent attribute lookup raises AttributeError
+        with self.assertRaises(AttributeError):
+            _ = protocol.non_existent_field
+
+    def test_exists_case_insensitive_caching(self):
+        # Create nested test structure with mixed casing
+        sub_dir = os.path.join(self.base, "MixedCaseDir", "SubFolder")
+        os.makedirs(sub_dir, exist_ok=True)
+        test_file = os.path.join(sub_dir, "TargetFile.TXT")
+        with open(test_file, "w", encoding="utf-8") as f:
+            f.write("content")
+
+        # Test case-insensitive resolution
+        self.assertTrue(_exists_case_insensitive(self.base, "mixedcasedir/subfolder/targetfile.txt"))
+        self.assertTrue(_exists_case_insensitive(self.base, "MIXEDCASEDIR/SUBFOLDER/TARGETFILE.TXT"))
+        self.assertTrue(_exists_case_insensitive(self.base, "MixedCaseDir/SubFolder/TargetFile.TXT"))
+
+        # Non-existent files/directories should return False
+        self.assertFalse(_exists_case_insensitive(self.base, "mixedcasedir/subfolder/nonexistent.txt"))
+        self.assertFalse(_exists_case_insensitive(self.base, "wrongdir/subfolder/targetfile.txt"))
+
+        # Test _listdir_lower_map caching directly
+        entries = _listdir_lower_map(sub_dir)
+        self.assertIsNotNone(entries)
+        self.assertIn("targetfile.txt", entries)
+        self.assertGreater(_listdir_lower_map.cache_info().currsize, 0)
+
+        # Clear case cache explicitly and ensure cache is reset
+        clear_case_cache()
+        self.assertEqual(_listdir_lower_map.cache_info().currsize, 0)
+
+        # Populate cache again and verify synchronize() automatically clears it
+        _ = _listdir_lower_map(self.base)
+        self.assertGreater(_listdir_lower_map.cache_info().currsize, 0)
+        protocol = SyncProtocol(use_stdout=False)
+        syncer = Synchronizer(max_workers=1)
+        syncer.synchronize(
+            origin_path=self.source,
+            backup_path=self.target,
+            doSync=False,
+            archiv_path=self.archive,
+            protocol=protocol
+        )
+        self.assertEqual(_listdir_lower_map.cache_info().currsize, 0)
 
     def test_single_threaded_sync(self):
         f1 = os.path.join(self.source, "file1.txt")
@@ -637,6 +736,567 @@ class TestSyncLogic(unittest.TestCase):
         self.assertIn("TargetSpaceAfter:", content)
         self.assertIn("TargetSpaceDelta:", content)
         self.assertIn("TargetFreeSpace:", content)
+
+    def test_archive_before_overwrite_temp_first_on_copy_failure(self):
+        # Verify that if copy fails (e.g. source read error or hash mismatch),
+        # the destination file is NEVER prematurely archived and remains completely intact!
+        f_src = os.path.join(self.source, "important_doc.txt")
+        f_dst = os.path.join(self.target, "important_doc.txt")
+
+        with open(f_src, "w", encoding="utf-8") as f:
+            f.write("brand new version that will fail during transfer")
+        with open(f_dst, "w", encoding="utf-8") as f:
+            f.write("original intact backup content")
+
+        protocol = SyncProtocol(use_stdout=False)
+        syncer = Synchronizer(max_workers=1)
+
+        orig_copy_file = file_core.copy_file
+
+        def failing_copy_file(*args, **kwargs):
+            raise OSError("Simulated disk I/O or network failure during streaming")
+
+        file_core.copy_file = failing_copy_file
+        try:
+            syncer.synchronize(
+                origin_path=self.source,
+                backup_path=self.target,
+                doSync=False,
+                archiv_path=self.archive,
+                protocol=protocol
+            )
+        finally:
+            file_core.copy_file = orig_copy_file
+
+        # Destination must still have its original content!
+        self.assertTrue(os.path.exists(f_dst))
+        with open(f_dst, "r", encoding="utf-8") as f:
+            self.assertEqual(f.read(), "original intact backup content")
+
+        # Archive directory must be empty because the file was never prematurely moved!
+        self.assertEqual(len(os.listdir(self.archive)), 0)
+        self.assertEqual(protocol.files_archived, 0)
+        self.assertEqual(protocol.errors, 1)
+
+    def test_archive_before_overwrite_abort_on_archive_failure(self):
+        # Verify that if archive_file fails, the existing backup file is untouched!
+        f_src = os.path.join(self.source, "doc.txt")
+        f_dst = os.path.join(self.target, "doc.txt")
+
+        with open(f_src, "w", encoding="utf-8") as f:
+            f.write("new content")
+        with open(f_dst, "w", encoding="utf-8") as f:
+            f.write("original content")
+
+        protocol = SyncProtocol(use_stdout=False)
+        syncer = Synchronizer(max_workers=1)
+
+        orig_archive_file = syncer.archive_file
+        syncer.archive_file = lambda *args, **kwargs: (False, None)
+
+        try:
+            syncer.synchronize(
+                origin_path=self.source,
+                backup_path=self.target,
+                doSync=False,
+                archiv_path=self.archive,
+                protocol=protocol
+            )
+        finally:
+            syncer.archive_file = orig_archive_file
+
+        # Destination file must be preserved
+        self.assertTrue(os.path.exists(f_dst))
+        with open(f_dst, "r", encoding="utf-8") as f:
+            self.assertEqual(f.read(), "original content")
+        self.assertEqual(protocol.errors, 1)
+
+    def test_dry_run_overwrite_archiving(self):
+        # Verify that in dry-run mode, modified files simulate both archiving and updating
+        f_src = os.path.join(self.source, "dry_doc.txt")
+        f_dst = os.path.join(self.target, "dry_doc.txt")
+
+        with open(f_src, "w", encoding="utf-8") as f:
+            f.write("updated version")
+        with open(f_dst, "w", encoding="utf-8") as f:
+            f.write("old version")
+
+        protocol = SyncProtocol(use_stdout=False)
+        syncer = Synchronizer(max_workers=1, dry_run=True)
+
+        syncer.synchronize(
+            origin_path=self.source,
+            backup_path=self.target,
+            doSync=False,
+            archiv_path=self.archive,
+            protocol=protocol
+        )
+
+        self.assertEqual(protocol.files_checked, 1)
+        self.assertEqual(protocol.files_updated, 1)
+        self.assertEqual(protocol.files_modified, 1)
+        self.assertEqual(protocol.files_archived, 1)
+        # Verify no files were actually modified or archived
+        with open(f_dst, "r", encoding="utf-8") as f:
+            self.assertEqual(f.read(), "old version")
+        self.assertEqual(len(os.listdir(self.archive)), 0)
+
+    def test_archive_directory_atomic_success(self):
+        # Create a directory with multiple files and nested folders in target
+        dir_to_archive = os.path.join(self.target, "folder_to_archive")
+        nested_sub = os.path.join(dir_to_archive, "sub")
+        file_core.make_directory(nested_sub)
+        with open(os.path.join(dir_to_archive, "file1.txt"), "w", encoding="utf-8") as f:
+            f.write("data1")
+        with open(os.path.join(nested_sub, "file2.txt"), "w", encoding="utf-8") as f:
+            f.write("data2")
+
+        protocol = SyncProtocol(use_stdout=False)
+        syncer = Synchronizer(max_workers=1)
+
+        success, arch_dir = syncer.archive_directory(dir_to_archive, self.target, self.archive, protocol)
+        self.assertTrue(success)
+        self.assertIsNotNone(arch_dir)
+        self.assertFalse(os.path.exists(dir_to_archive))
+        self.assertTrue(os.path.exists(arch_dir))
+        self.assertTrue(os.path.exists(os.path.join(arch_dir, "file1.txt")))
+        self.assertTrue(os.path.exists(os.path.join(arch_dir, "sub", "file2.txt")))
+        self.assertEqual(protocol.directories_archived, 1)
+
+    def test_archive_directory_staged_fallback_on_copy_failure(self):
+        # Verify that if direct rename fails (e.g. cross-device) and staged copy fails,
+        # the original directory is NOT deleted or corrupted, and staging is cleaned up!
+        dir_to_archive = os.path.join(self.target, "critical_dir")
+        file_core.make_directory(dir_to_archive)
+        with open(os.path.join(dir_to_archive, "important.txt"), "w", encoding="utf-8") as f:
+            f.write("must not be lost")
+
+        protocol = SyncProtocol(use_stdout=False)
+        syncer = Synchronizer(max_workers=1)
+
+        orig_replace = os.replace
+        orig_copytree = shutil.copytree
+
+        def failing_replace(src, dst):
+            # Force os.replace to fail with EXDEV to simulate cross-device move
+            raise OSError(18, "Cross-device link")
+
+        def failing_copytree(src, dst, **kwargs):
+            # Simulate failure partway through staged copy (e.g. ENOSPC)
+            file_core.make_directory(dst)
+            raise OSError(28, "No space left on device")
+
+        os.replace = failing_replace
+        shutil.copytree = failing_copytree
+
+        try:
+            success, arch_dir = syncer.archive_directory(dir_to_archive, self.target, self.archive, protocol)
+            self.assertFalse(success)
+            self.assertIsNone(arch_dir)
+        finally:
+            os.replace = orig_replace
+            shutil.copytree = orig_copytree
+
+        # Original directory must be 100% intact!
+        self.assertTrue(os.path.exists(dir_to_archive))
+        with open(os.path.join(dir_to_archive, "important.txt"), "r", encoding="utf-8") as f:
+            self.assertEqual(f.read(), "must not be lost")
+
+        # Staging directory must have been cleaned up
+        archive_items = os.listdir(self.archive)
+        self.assertEqual(len(archive_items), 0)
+        self.assertEqual(protocol.errors, 1)
+
+    def test_case_folding_cross_platform_prune_protection(self):
+        # Verify that when backup has lowercase and source has mixed case,
+        # the file in backup is NOT pruned as a false orphan!
+        sub_src = os.path.join(self.source, "MixedCaseDir")
+        sub_dst = os.path.join(self.target, "MixedCaseDir")
+        file_core.make_directory(sub_src)
+        file_core.make_directory(sub_dst)
+
+        f_src = os.path.join(sub_src, "Document.PDF")
+        f_dst = os.path.join(sub_dst, "document.pdf")
+
+        with open(f_src, "w", encoding="utf-8") as f:
+            f.write("content")
+        with open(f_dst, "w", encoding="utf-8") as f:
+            f.write("content")
+
+        protocol = SyncProtocol(use_stdout=False)
+        syncer = Synchronizer(max_workers=1)
+
+        # known_source_files contains the exact case from source
+        known_sources = {"MixedCaseDir/Document.PDF"}
+        syncer.prune(self.source, self.target, archiv_path=self.archive, protocol=protocol, known_source_files=known_sources)
+
+        # The file in backup must NOT have been pruned
+        self.assertTrue(os.path.exists(f_dst))
+        self.assertEqual(protocol.files_deleted, 0)
+
+    def test_case_folding_directory_prune_protection(self):
+        # Verify that when backup directory has different casing than source,
+        # it is NOT pruned if the directory exists in source!
+        sub_src = os.path.join(self.source, "Photos")
+        sub_dst = os.path.join(self.target, "photos")
+        file_core.make_directory(sub_src)
+        file_core.make_directory(sub_dst)
+
+        with open(os.path.join(sub_src, "pic.jpg"), "w", encoding="utf-8") as f:
+            f.write("image")
+        with open(os.path.join(sub_dst, "pic.jpg"), "w", encoding="utf-8") as f:
+            f.write("image")
+
+        protocol = SyncProtocol(use_stdout=False)
+        syncer = Synchronizer(max_workers=1)
+
+        known_sources = {"Photos/pic.jpg"}
+        syncer.prune(self.source, self.target, archiv_path=self.archive, protocol=protocol, known_source_files=known_sources)
+
+        # Directory and file in backup must be preserved
+        self.assertTrue(os.path.exists(sub_dst))
+        self.assertEqual(protocol.directories_deleted, 0)
+
+    def test_case_sensitive_strict_normalization(self):
+        # Verify normalize_rel_path with case_sensitive=True preserves case even on Windows
+        path = "Folder\\SubFolder\\File.TXT"
+        res = normalize_rel_path(path, platform="win32", case_sensitive=True)
+        self.assertEqual(res, "Folder/SubFolder/File.TXT")
+
+        # Without case_sensitive, on Windows it lowercases
+        res_default = normalize_rel_path(path, platform="win32", case_sensitive=False)
+        self.assertEqual(res_default, "folder/subfolder/file.txt")
+
+    def test_drive_lock_multi_host_protection(self):
+        # Verify that a lock held by a foreign host is NOT stolen even if local PID is unused
+        lock_file = os.path.join(self.base, ".backup.lock")
+        foreign_content = (
+            "PID: 999999\n"
+            "Hostname: foreign-host-xyz\n"
+            "UUID: foreign-uuid-12345\n"
+            "Started: 2026-09-22 10:00:00\n"
+            "Fallback: False\n"
+        )
+        with open(lock_file, "w", encoding="utf-8") as f:
+            f.write(foreign_content)
+
+        # Set mtime to 10 minutes ago (< 2 hours)
+        recent_mtime = time.time() - 600
+        os.utime(lock_file, (recent_mtime, recent_mtime))
+
+        lock = BackupDriveLock(self.base)
+        self.assertFalse(lock.acquire(), "Foreign lock must not be stolen by local process")
+        self.assertTrue(os.path.exists(lock_file))
+
+        # Now age the lock beyond 2 hours (> 7200s)
+        stale_mtime = time.time() - 7300
+        os.utime(lock_file, (stale_mtime, stale_mtime))
+
+        self.assertTrue(lock.acquire(), "Stale foreign lock (>2h) must be acquired")
+        lock.release()
+        self.assertFalse(os.path.exists(lock_file))
+
+    def test_drive_lock_empty_file_stale_cleanup(self):
+        # Verify that 0-byte lock file created >10s ago (crash leftover) is cleared immediately
+        lock_file = os.path.join(self.base, ".backup.lock")
+        with open(lock_file, "w", encoding="utf-8") as f:
+            pass  # 0 bytes
+
+        # Case 1: Fresh 0-byte file (2s old) -> should NOT be stolen (might be active creation)
+        fresh_mtime = time.time() - 2
+        os.utime(lock_file, (fresh_mtime, fresh_mtime))
+
+        lock = BackupDriveLock(self.base)
+        self.assertFalse(lock.acquire())
+
+        # Case 2: Crash leftover (>10s old) -> recognized as crash and acquired
+        stale_mtime = time.time() - 15
+        os.utime(lock_file, (stale_mtime, stale_mtime))
+
+        self.assertTrue(lock.acquire())
+        self.assertTrue(os.path.exists(lock_file))
+        lock.release()
+        self.assertFalse(os.path.exists(lock_file))
+
+    def test_drive_lock_uuid_owner_release(self):
+        # Verify that only the instance that created the lock can delete it on release
+        lock1 = BackupDriveLock(self.base)
+        self.assertTrue(lock1.acquire())
+        self.assertTrue(os.path.exists(lock1.lock_file_path))
+
+        # Second lock instance in same process with different UUID
+        lock2 = BackupDriveLock(self.base)
+        self.assertNotEqual(lock1.lock_uuid, lock2.lock_uuid)
+        lock2.handle = None  # simulate not acquired
+        lock2.release()
+
+        # lock1's file must still exist because lock2 does not own the UUID
+        self.assertTrue(os.path.exists(lock1.lock_file_path))
+
+        # lock1 releases -> file must be removed
+        lock1.release()
+        self.assertFalse(os.path.exists(lock1.lock_file_path))
+
+    def test_fatal_enospc_aborts_immediately_without_prune(self):
+        # Verify that FatalBackupError (ENOSPC / EROFS) immediately aborts backup and skips prune
+        src_file = os.path.join(self.source, "new_data.txt")
+        with open(src_file, "w", encoding="utf-8") as f:
+            f.write("new content")
+
+        # Destination has an old file that would normally be pruned
+        old_file = os.path.join(self.target, "orphan_to_keep.txt")
+        with open(old_file, "w", encoding="utf-8") as f:
+            f.write("vital backup data")
+
+        protocol = SyncProtocol(use_stdout=False)
+        syncer = Synchronizer(max_workers=1)
+
+        # Mock copy_file to simulate ENOSPC
+        orig_copy = file_core.copy_file
+        def mock_copy_file(*args, **kwargs):
+            raise file_core.FatalBackupError("Simulated disk full (ENOSPC)")
+
+        file_core.copy_file = mock_copy_file
+        try:
+            with self.assertRaises(file_core.FatalBackupError):
+                syncer.synchronize(
+                    origin_path=self.source,
+                    backup_path=self.target,
+                    doSync=True,
+                    archiv_path=self.archive,
+                    protocol=protocol
+                )
+        finally:
+            file_core.copy_file = orig_copy
+
+        # CRITICAL: old_file in target must NOT have been pruned!
+        self.assertTrue(os.path.exists(old_file), "Pruning must be skipped when FatalBackupError occurs!")
+        self.assertGreater(protocol.errors, 0)
+
+    def test_max_workers_bounds_enforcement(self):
+        # Synchronizer must clamp max_workers <= 0 to at least 1
+        s0 = Synchronizer(max_workers=0)
+        self.assertEqual(s0.max_workers, 1)
+
+        s_neg = Synchronizer(max_workers=-4)
+        self.assertEqual(s_neg.max_workers, 1)
+
+        # validate_jobs must clamp max_workers <= 0 to at least 1
+        jobs = [{"source": self.source, "target_dir": "test_t", "max_workers": 0}]
+        valid = validate_jobs(jobs, self.base)
+        self.assertEqual(valid[0]["max_workers"], 1)
+
+        jobs_neg = [{"source": self.source, "target_dir": "test_t", "max_workers": -10}]
+        valid_neg = validate_jobs(jobs_neg, self.base)
+        self.assertEqual(valid_neg[0]["max_workers"], 1)
+
+    def test_symlinks_skipped_counter(self):
+        # Verify symlinks_skipped counter in protocol, property, and stats output
+        stats_file = os.path.join(self.base, "stats.txt")
+        protocol = SyncProtocol(log_file=stats_file, use_stdout=False)
+        self.assertEqual(protocol.symlinks_skipped, 0)
+
+        protocol.inc_stat("symlinks_skipped")
+        self.assertEqual(protocol.symlinks_skipped, 1)
+
+        protocol.symlinks_skipped += 2
+        self.assertEqual(protocol.symlinks_skipped, 3)
+
+        protocol.write_statistics(stats_file)
+        protocol.close()
+        with open(stats_file, "r", encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("SymlinksSkipped: 3", content)
+
+    def test_archive_result_tuple_compatibility(self):
+        # Verify ArchiveResult acts as a 2-tuple for backwards compatibility and provides .method
+        res = ArchiveResult(True, "/fake/archive.txt", method="hardlink")
+        self.assertIsInstance(res, tuple)
+        self.assertEqual(len(res), 2)
+        success, path = res
+        self.assertTrue(success)
+        self.assertEqual(path, "/fake/archive.txt")
+        self.assertEqual(res.success, True)
+        self.assertEqual(res.path, "/fake/archive.txt")
+        self.assertEqual(res.method, "hardlink")
+
+    def test_archive_file_hardlink_first_success(self):
+        # Verify that archive_file with prefer_hardlink=True creates a hardlink on supported FS
+        f_target = os.path.join(self.target, "hardlink_source.txt")
+        with open(f_target, "w", encoding="utf-8") as f:
+            f.write("original version data")
+
+        protocol = SyncProtocol(use_stdout=False)
+        syncer = Synchronizer(max_workers=1)
+
+        res = syncer.archive_file(f_target, self.target, self.archive, protocol, prefer_hardlink=True)
+        self.assertTrue(res.success)
+        self.assertEqual(res.method, "hardlink")
+
+        # Original file MUST STILL EXIST at f_target!
+        self.assertTrue(os.path.exists(f_target), "Original file must not be removed when hardlinked!")
+        # Archive file must exist
+        self.assertTrue(os.path.exists(res.path))
+        # Both must point to the identical file on disk
+        self.assertTrue(os.path.samefile(f_target, res.path))
+        self.assertGreaterEqual(os.stat(f_target).st_nlink, 2)
+        self.assertEqual(protocol.files_archived, 1)
+
+    def test_archive_file_copy_first_fallback_on_os_error(self):
+        # Verify fallback to shutil.copy2 when os.link raises OSError (e.g. cross-device EXDEV or FAT32)
+        f_target = os.path.join(self.target, "fallback_source.txt")
+        with open(f_target, "w", encoding="utf-8") as f:
+            f.write("fallback test data")
+
+        protocol = SyncProtocol(use_stdout=False)
+        syncer = Synchronizer(max_workers=1)
+
+        orig_link = os.link
+        def mock_link_fail(src, dst):
+            raise OSError(errno.EXDEV, "Invalid cross-device link")
+
+        os.link = mock_link_fail
+        try:
+            # Case 1: prefer_hardlink=True -> Copy-First Fallback
+            res = syncer.archive_file(f_target, self.target, self.archive, protocol, prefer_hardlink=True)
+            self.assertTrue(res.success)
+            self.assertEqual(res.method, "copy")
+            # In copy mode, f_target MUST STILL EXIST at the target path (Zero-Gap Overwrite Protection!)
+            self.assertTrue(os.path.exists(f_target), "Copy-First fallback must preserve original file at target path!")
+            self.assertTrue(os.path.exists(res.path))
+            with open(res.path, "r", encoding="utf-8") as f:
+                self.assertEqual(f.read(), "fallback test data")
+
+            # Case 2: prefer_hardlink=False (Pruning) -> performs move
+            res_move = syncer.archive_file(f_target, self.target, self.archive, protocol, prefer_hardlink=False)
+            self.assertTrue(res_move.success)
+            self.assertEqual(res_move.method, "move")
+            self.assertFalse(os.path.exists(f_target), "Pruning archive must move the orphan file away!")
+            self.assertTrue(os.path.exists(res_move.path))
+        finally:
+            os.link = orig_link
+
+    def test_sync_single_file_hardlink_overwrite_flow(self):
+        # Verify end-to-end overwrite sync creates archive via hardlink and updates destination
+        f_src = os.path.join(self.source, "e2e_doc.txt")
+        f_dst = os.path.join(self.target, "e2e_doc.txt")
+
+        with open(f_src, "w", encoding="utf-8") as f:
+            f.write("Version 2 Content (updated and longer)")
+        with open(f_dst, "w", encoding="utf-8") as f:
+            f.write("Version 1")
+
+        protocol = SyncProtocol(use_stdout=False)
+        syncer = Synchronizer(max_workers=1)
+
+        syncer.synchronize(
+            origin_path=self.source,
+            backup_path=self.target,
+            doSync=False,
+            archiv_path=self.archive,
+            protocol=protocol,
+            force_hash=True
+        )
+
+        # Destination must now have Version 2
+        with open(f_dst, "r", encoding="utf-8") as f:
+            self.assertEqual(f.read(), "Version 2 Content (updated and longer)")
+
+        # Archive must contain Version 1
+        archived_files = [
+            os.path.join(self.archive, f) for f in os.listdir(self.archive)
+            if f.startswith("e2e_doc_")
+        ]
+        self.assertEqual(len(archived_files), 1)
+        with open(archived_files[0], "r", encoding="utf-8") as f:
+            self.assertEqual(f.read(), "Version 1")
+
+        self.assertEqual(protocol.files_archived, 1)
+        self.assertEqual(protocol.files_modified, 1)
+
+    def test_hardlink_overwrite_failure_cleans_archive_entry(self):
+        # Verify that if copy_file / os.replace fails, the original is intact and pending hardlink is cleaned
+        f_src = os.path.join(self.source, "fail_doc.txt")
+        f_dst = os.path.join(self.target, "fail_doc.txt")
+
+        with open(f_src, "w", encoding="utf-8") as f:
+            f.write("New Version (fails and is longer)")
+        with open(f_dst, "w", encoding="utf-8") as f:
+            f.write("Old Intact Version")
+
+        protocol = SyncProtocol(use_stdout=False)
+        syncer = Synchronizer(max_workers=1)
+
+        orig_replace = os.replace
+        def mock_replace(src, dst):
+            # Fail only when replacing f_dst, not for other temp operations
+            if os.path.abspath(dst) == os.path.abspath(file_core._long_path(f_dst)):
+                raise OSError(errno.EACCES, "Simulated access lock during replace")
+            return orig_replace(src, dst)
+
+        os.replace = mock_replace
+        try:
+            syncer.synchronize(
+                origin_path=self.source,
+                backup_path=self.target,
+                doSync=False,
+                archiv_path=self.archive,
+                protocol=protocol,
+                force_hash=True
+            )
+        finally:
+            os.replace = orig_replace
+
+        # CRITICAL ZERO DATA LOSS: Destination must still exist and be completely intact!
+        self.assertTrue(os.path.exists(f_dst))
+        with open(f_dst, "r", encoding="utf-8") as f:
+            self.assertEqual(f.read(), "Old Intact Version")
+
+        # Superfluous pending hardlink archive must have been cleaned up
+        archived_files = [
+            os.path.join(self.archive, f) for f in os.listdir(self.archive)
+            if f.startswith("fail_doc_")
+        ]
+        self.assertEqual(len(archived_files), 0, "Failed overwrite must clean up pending hardlink archive!")
+        self.assertGreater(protocol.errors, 0)
+
+    def test_drive_lock_force_unlock(self):
+        # Verify that force_unlock removes an active lock from a foreign host
+        lock_file = os.path.join(self.base, ".backup.lock")
+        with open(lock_file, "w", encoding="utf-8") as f:
+            f.write("PID: 999999\nHostname: other-active-machine\nUUID: foreign-uuid\n")
+
+        # Normal acquire fails
+        normal_lock = BackupDriveLock(self.base)
+        self.assertFalse(normal_lock.acquire())
+        self.assertTrue(os.path.exists(lock_file))
+
+        # Force unlock breaks lock and acquires
+        forced_lock = BackupDriveLock(self.base, force_unlock=True)
+        self.assertTrue(forced_lock.acquire())
+        self.assertTrue(os.path.exists(lock_file))
+        forced_lock.release()
+        self.assertFalse(os.path.exists(lock_file))
+
+    def test_drive_lock_custom_timeout(self):
+        # Verify custom lock timeout overrides default 7200 seconds
+        lock_file = os.path.join(self.base, ".backup.lock")
+        with open(lock_file, "w", encoding="utf-8") as f:
+            f.write("PID: 999999\nHostname: foreign-host\nUUID: timeout-uuid\n")
+
+        # Set age to 120 seconds
+        mtime = time.time() - 120
+        os.utime(lock_file, (mtime, mtime))
+
+        # With default 7200s timeout, age 120s is NOT stale
+        default_lock = BackupDriveLock(self.base)
+        self.assertFalse(default_lock.acquire())
+
+        # With custom 60s timeout, age 120s IS stale and acquired
+        custom_lock = BackupDriveLock(self.base, stale_timeout_seconds=60)
+        self.assertTrue(custom_lock.acquire())
+        custom_lock.release()
+        self.assertFalse(os.path.exists(lock_file))
 
 
 if __name__ == "__main__":

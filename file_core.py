@@ -21,12 +21,30 @@ import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Tuple, Union
+from typing import Callable, Optional, Tuple, Union
 
 PathLike = Union[str, Path]
 
 HASH_BUFFER_SIZE = 1048576  # 1 MB buffer
 MTIME_TOLERANCE_SECONDS = 2.0
+
+
+class FatalBackupError(OSError):
+    """Raised on critical filesystem errors requiring immediate backup abort (e.g. disk full, read-only volume)."""
+    pass
+
+
+def is_fatal_storage_error(e: BaseException) -> bool:
+    """Check if exception represents an unrecoverable disk-full or read-only filesystem error."""
+    if isinstance(e, FatalBackupError):
+        return True
+    if isinstance(e, OSError):
+        # errno.ENOSPC = 28 (No space left on device)
+        # errno.EROFS = 30 (Read-only file system)
+        # winerror 112 = ERROR_DISK_FULL
+        if getattr(e, 'errno', None) in (errno.ENOSPC, errno.EROFS) or getattr(e, 'winerror', None) == 112:
+            return True
+    return False
 
 
 def _long_path(path: PathLike) -> str:
@@ -89,10 +107,12 @@ def make_directory(path: Optional[PathLike]) -> bool:
         p.mkdir(parents=True, exist_ok=True)
         return True
     except OSError as e:
+        if is_fatal_storage_error(e):
+            raise FatalBackupError(f"Fatal directory creation failure for {path} (Disk Full / Read-Only): {e}") from e
         raise OSError(f"Error when creating directory {path}: {e}") from e
 
 
-def copy_file(source: PathLike, destination: PathLike, follow_symlinks: bool = False, verify_hash: bool = True) -> bool:
+def copy_file(source: PathLike, destination: PathLike, follow_symlinks: bool = False, verify_hash: bool = True, pre_replace_callback: Optional[Callable[[str], None]] = None) -> bool:
     if not is_file(source):
         return False
 
@@ -133,6 +153,9 @@ def copy_file(source: PathLike, destination: PathLike, follow_symlinks: bool = F
             if src_digest != dst_digest:
                 raise OSError(f"Streaming hash verification failed! Source: {src_digest} != Dest: {dst_digest}")
 
+        if pre_replace_callback is not None:
+            pre_replace_callback(str(destination))
+
         if is_file(destination):
             remove_readonly(destination)
 
@@ -157,6 +180,8 @@ def copy_file(source: PathLike, destination: PathLike, follow_symlinks: bool = F
                 os.remove(_long_path(tmp_destination))
             except OSError:
                 pass
+        if is_fatal_storage_error(e):
+            raise FatalBackupError(f"Fatal storage failure while copying {source} to {destination} (Disk Full / Read-Only): {e}") from e
         if isinstance(e, OSError):
             raise OSError(f"Error copying file from {source} to {destination}: {e}") from e
         raise
