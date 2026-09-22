@@ -21,6 +21,7 @@ import socket
 import string
 import sys
 import uuid
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -232,6 +233,17 @@ class BackupDriveLock:
             except OSError:
                 pass
 
+    def touch(self) -> None:
+        """
+        Refreshes the lock file modification time to indicate ongoing activity.
+        Prevents other processes from assuming the lock is stale during long backup runs.
+        """
+        if self.lock_file_path and os.path.exists(self.lock_file_path):
+            try:
+                os.utime(self.lock_file_path, None)
+            except OSError:
+                pass
+
     def __enter__(self) -> 'BackupDriveLock':
         if not self.acquire():
             info = self._read_lock_info()
@@ -256,6 +268,7 @@ class BackupDriveLock:
 class NoOpLock:
     def __enter__(self) -> 'NoOpLock': return self
     def __exit__(self, exc_type, exc_val, exc_tb) -> None: pass
+    def touch(self) -> None: pass
 
 
 def find_backup_drive() -> Optional[str]:
@@ -263,7 +276,16 @@ def find_backup_drive() -> Optional[str]:
     candidate_paths: List[str] = []
 
     if system == "Windows":
-        candidate_paths = [f"{d}:\\" for d in string.ascii_uppercase if os.path.exists(f"{d}:\\")]
+        try:
+            import ctypes
+            bitmask = ctypes.windll.kernel32.GetLogicalDrives()
+            candidate_paths = [
+                f"{string.ascii_uppercase[i]}:\\"
+                for i in range(26)
+                if (bitmask >> i) & 1 and os.path.exists(f"{string.ascii_uppercase[i]}:\\")
+            ]
+        except Exception:
+            candidate_paths = [f"{d}:\\" for d in string.ascii_uppercase if os.path.exists(f"{d}:\\")]
     elif system == "Darwin":
         volumes_dir = "/Volumes"
         if os.path.exists(volumes_dir):
@@ -323,7 +345,13 @@ def validate_jobs(jobs: List[Dict[str, Any]], base_drive: str) -> List[Dict[str,
             print(f"WARNING: Skipping job entry at index {idx} missing required 'source' or 'target_dir' keys.")
             continue
 
-        raw_target = str(job["target_dir"]).strip()
+        raw_source = unicodedata.normalize('NFC', str(job["source"]).strip())
+        raw_target = unicodedata.normalize('NFC', str(job["target_dir"]).strip())
+
+        if not raw_source or not raw_target:
+            print(f"WARNING: Skipping job entry at index {idx} with empty 'source' or 'target_dir'.")
+            continue
+
         target_dir = os.path.normpath(raw_target)
 
         # Reject absolute paths, drive-scoped paths (e.g. C:foo), UNC paths, or directory traversal
@@ -358,7 +386,7 @@ def validate_jobs(jobs: List[Dict[str, Any]], base_drive: str) -> List[Dict[str,
         case_sensitive_excludes = bool(job.get("case_sensitive_excludes", False))
 
         validated.append({
-            "source": str(job["source"]).strip(),
+            "source": raw_source,
             "target_dir": target_dir,
             "excludes": list(job.get("excludes", [])),
             "case_sensitive_excludes": case_sensitive_excludes,
@@ -475,6 +503,7 @@ def main() -> None:
                     )
 
                     for job in backup_jobs:
+                        drive_lock.touch()
                         source = job["source"]
                         bk_target = os.path.join(bdrive, job["target_dir"])
                         archive_target = os.path.join(archived_base, job["target_dir"])

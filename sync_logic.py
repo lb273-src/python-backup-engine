@@ -94,7 +94,7 @@ def normalize_rel_path(path: str, platform: Optional[str] = None, case_sensitive
     if case_sensitive:
         return norm
     plat = platform or sys.platform
-    if plat == "win32":
+    if plat in ("win32", "darwin"):
         return norm.lower()
     return norm
 
@@ -225,7 +225,7 @@ class SyncProtocol:
 
     def set_stat(self, stat_name: str, value: int) -> None:
         with self._lock:
-            self.stats[stat_name] = value
+            self.stats[stat_name] = int(value)
 
     def __getattr__(self, name: str) -> Any:
         if name in self.STAT_FIELDS:
@@ -236,7 +236,7 @@ class SyncProtocol:
     def __setattr__(self, name: str, value: Any) -> None:
         if name in getattr(self, 'STAT_FIELDS', ()):
             with self._lock:
-                self.stats[name] = value
+                self.stats[name] = int(value)
         elif (
             name in getattr(self, 'ALLOWED_INSTANCE_FIELDS', ())
             or name.startswith('_')

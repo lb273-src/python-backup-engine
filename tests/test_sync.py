@@ -273,6 +273,14 @@ class TestSyncLogic(unittest.TestCase):
         self.assertEqual(protocol.errors, 2)
         self.assertEqual(protocol.get_stat("errors"), 2)
 
+        # Int conversion enforcement for stat assignments
+        protocol.files_checked = "42"
+        self.assertEqual(protocol.files_checked, 42)
+        self.assertIsInstance(protocol.files_checked, int)
+        protocol.set_stat("files_checked", "99")
+        self.assertEqual(protocol.files_checked, 99)
+        self.assertIsInstance(protocol.get_stat("files_checked"), int)
+
         # Typo protection: assigning to unknown non-stat attribute raises AttributeError
         with self.assertRaises(AttributeError):
             protocol.files_cheked = 5  # Intentional typo
@@ -967,6 +975,10 @@ class TestSyncLogic(unittest.TestCase):
         res_default = normalize_rel_path(path, platform="win32", case_sensitive=False)
         self.assertEqual(res_default, "folder/subfolder/file.txt")
 
+        # On macOS (darwin), default normalization also lowercases (APFS case-insensitivity)
+        res_darwin = normalize_rel_path(path, platform="darwin", case_sensitive=False)
+        self.assertEqual(res_darwin, "folder/subfolder/file.txt")
+
     def test_drive_lock_multi_host_protection(self):
         # Verify that a lock held by a foreign host is NOT stolen even if local PID is unused
         lock_file = os.path.join(self.base, ".backup.lock")
@@ -1089,6 +1101,26 @@ class TestSyncLogic(unittest.TestCase):
         jobs_neg = [{"source": self.source, "target_dir": "test_t", "max_workers": -10}]
         valid_neg = validate_jobs(jobs_neg, self.base)
         self.assertEqual(valid_neg[0]["max_workers"], 1)
+
+    def test_validate_jobs_empty_and_unicode_nfc(self):
+        # 1. Empty or whitespace source/target_dir are rejected
+        empty_jobs = [
+            {"source": "", "target_dir": "valid_target"},
+            {"source": "   ", "target_dir": "valid_target"},
+            {"source": self.source, "target_dir": ""},
+            {"source": self.source, "target_dir": "   "},
+        ]
+        valid = validate_jobs(empty_jobs, self.base)
+        self.assertEqual(len(valid), 0)
+
+        # 2. Unicode NFD is normalized to NFC
+        import unicodedata
+        nfd_str = "e\u0301cole"  # NFD representation of école
+        self.assertEqual(unicodedata.normalize("NFD", nfd_str), nfd_str)
+        unicode_jobs = [{"source": self.source, "target_dir": nfd_str}]
+        valid_unicode = validate_jobs(unicode_jobs, self.base)
+        self.assertEqual(len(valid_unicode), 1)
+        self.assertEqual(valid_unicode[0]["target_dir"], unicodedata.normalize("NFC", nfd_str))
 
     def test_symlinks_skipped_counter(self):
         # Verify symlinks_skipped counter in protocol, property, and stats output
@@ -1297,6 +1329,21 @@ class TestSyncLogic(unittest.TestCase):
         self.assertTrue(custom_lock.acquire())
         custom_lock.release()
         self.assertFalse(os.path.exists(lock_file))
+
+    def test_drive_lock_touch(self):
+        lock = BackupDriveLock(self.base)
+        self.assertTrue(lock.acquire())
+        initial_mtime = os.stat(lock.lock_file_path).st_mtime
+
+        # Set past mtime, then touch
+        past_mtime = initial_mtime - 100
+        os.utime(lock.lock_file_path, (past_mtime, past_mtime))
+        self.assertAlmostEqual(os.stat(lock.lock_file_path).st_mtime, past_mtime, delta=1.0)
+
+        lock.touch()
+        new_mtime = os.stat(lock.lock_file_path).st_mtime
+        self.assertGreater(new_mtime, past_mtime)
+        lock.release()
 
 
 if __name__ == "__main__":
