@@ -264,6 +264,7 @@ class BackupDriveLock:
             pid = info.get('pid')
             host = info.get('hostname')
             started = info.get('started')
+            lock_uuid = info.get('uuid')
             details = []
             if pid:
                 details.append(f"PID {pid}")
@@ -271,8 +272,13 @@ class BackupDriveLock:
                 details.append(f"host '{host}'")
             if started:
                 details.append(f"started {started}")
+            if lock_uuid:
+                details.append(f"UUID {lock_uuid[:8]}...")
             detail_str = f" ({', '.join(details)})" if details else ""
-            raise RuntimeError(f"Backup drive is currently locked by another process{detail_str}.")
+            raise RuntimeError(
+                f"Backup drive is currently locked by another process{detail_str}. "
+                "If the previous process crashed or was terminated, use --force-unlock to clear."
+            )
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:

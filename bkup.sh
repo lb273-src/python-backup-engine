@@ -16,13 +16,13 @@ if command -v python3 &>/dev/null; then
 elif command -v python &>/dev/null; then
     PYTHON_BIN="python"
 else
-    echo "ERROR: Python 3.8 or newer is required and neither 'python3' nor 'python' was found in PATH." >&2
+    echo "ERROR: Python 3.9 or newer is required and neither 'python3' nor 'python' was found in PATH." >&2
     exit 1
 fi
 
-# Require at least Python 3.8
-if ! "$PYTHON_BIN" -c 'import sys; exit(0 if sys.version_info >= (3, 8) else 1)' 2>/dev/null; then
-    echo "ERROR: Python 3.8 or newer is required ($PYTHON_BIN version is insufficient)." >&2
+# Require at least Python 3.9
+if ! "$PYTHON_BIN" -c 'import sys; exit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
+    echo "ERROR: Python 3.9 or newer is required ($PYTHON_BIN version is insufficient)." >&2
     exit 1
 fi
 

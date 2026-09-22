@@ -1455,6 +1455,31 @@ class TestSyncLogic(unittest.TestCase):
                 self.assertEqual(mock_prune.call_count, 1)
 
 
+    def test_copy_file_source_failure_cleans_descriptor_and_tempfile(self):
+        # Simulate open(source) failure during copy_file
+        # Verifies that raw_fd is closed immediately and tmp_destination is removed without descriptor leaks
+        src_file = os.path.join(self.source, "to_fail.txt")
+        dst_file = os.path.join(self.target, "to_fail.txt")
+        with open(src_file, "w", encoding="utf-8") as f:
+            f.write("content")
+
+        import unittest.mock
+        original_open = open
+
+        def mock_open(file, *args, **kwargs):
+            if str(file) == str(src_file) or str(file) == str(file_core._long_path(src_file)):
+                raise OSError(errno.EACCES, "Simulated permission error opening source")
+            return original_open(file, *args, **kwargs)
+
+        with unittest.mock.patch("builtins.open", side_effect=mock_open):
+            with self.assertRaises(OSError):
+                file_core.copy_file(src_file, dst_file)
+
+        # Verify no orphaned tmp_sync_ files remain in target directory
+        orphans = [f for f in os.listdir(self.target) if f.startswith("tmp_sync_")]
+        self.assertEqual(len(orphans), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
 

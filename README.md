@@ -5,7 +5,7 @@ Designed around the principle of **zero data loss**, this engine replaces destru
 
 **Version:** 1.3.0  
 **License:** MIT  
-**Requirements:** Python ≥ 3.8 (standard library only)
+**Requirements:** Python ≥ 3.9 (standard library only)
 
 ---
 
@@ -235,7 +235,7 @@ The orchestrator returns distinct exit codes for reliable integration with cron,
 ├── bkup.sh / bkup.bat   # Cross-platform convenience launchers
 ├── jobs.json            # Synchronization job definitions (user-specific, git-ignored)
 ├── jobs.json.example    # Configuration template
-├── tests/               # Automated unit & regression test suite (56 tests)
+├── tests/               # Automated unit & regression test suite (57 tests)
 │   └── test_sync.py
 ├── LICENSE              # MIT License
 └── README.md            # This file

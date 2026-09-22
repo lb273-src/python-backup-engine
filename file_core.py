@@ -165,23 +165,26 @@ def copy_file(source: PathLike, destination: PathLike, follow_symlinks: bool = F
     tmp_destination_lp = _long_path(tmp_destination)
     src_hasher = hashlib.sha256() if verify_hash else None
     dst_hasher = hashlib.sha256() if verify_hash else None
+    raw_fd: Optional[int] = fd
 
     try:
-        with open(source_lp, "rb", buffering=0) as src, os.fdopen(fd, "wb", buffering=0) as dst:
-            while True:
-                buf = src.read(HASH_BUFFER_SIZE)
-                if not buf:
-                    break
-                if verify_hash:
-                    src_hasher.update(buf)  # type: ignore[union-attr]
-                dst.write(buf)
-                if verify_hash:
-                    dst_hasher.update(buf)  # type: ignore[union-attr]
-            dst.flush()
-            try:
-                os.fsync(dst.fileno())
-            except OSError:
-                pass
+        with open(source_lp, "rb", buffering=0) as src:
+            with os.fdopen(raw_fd, "wb", buffering=0) as dst:
+                raw_fd = None  # os.fdopen took ownership
+                while True:
+                    buf = src.read(HASH_BUFFER_SIZE)
+                    if not buf:
+                        break
+                    if verify_hash:
+                        src_hasher.update(buf)  # type: ignore[union-attr]
+                    dst.write(buf)
+                    if verify_hash:
+                        dst_hasher.update(buf)  # type: ignore[union-attr]
+                dst.flush()
+                try:
+                    os.fsync(dst.fileno())
+                except OSError:
+                    pass
 
         shutil.copystat(source_lp, tmp_destination_lp, follow_symlinks=follow_symlinks)
 
@@ -215,6 +218,11 @@ def copy_file(source: PathLike, destination: PathLike, follow_symlinks: bool = F
             set_readonly(destination)
         return True
     except BaseException as e:
+        if raw_fd is not None:
+            try:
+                os.close(raw_fd)
+            except OSError:
+                pass
         if is_file(tmp_destination):
             try:
                 os.remove(_long_path(tmp_destination))
