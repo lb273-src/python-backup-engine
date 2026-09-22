@@ -5,7 +5,8 @@ jobs.json
 protocol.txt
 bkupts.txt
 
-# Internal audit reports and developer prompts
+# Internal documentation, audit reports, and developer prompts
+docs/
 code.audit.md
 *.audit.md
 code_formatting_rules.md
