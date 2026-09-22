@@ -8,6 +8,7 @@ bkupts.txt
 # Internal audit reports
 code.audit.md
 *.audit.md
+code_formatting_rules.md
 
 # Python bytecode and cache
 __pycache__/
