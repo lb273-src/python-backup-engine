@@ -576,12 +576,18 @@ def main() -> None:
                         )
                 except KeyboardInterrupt:
                     print("\nBackup aborted by user signal.")
+                    protocol.add_protocol_entry('ABORT: Backup process aborted by user signal.')
+                    protocol.inc_stat('errors')
                 except file_core.FatalBackupError as fbe:
                     fatal_error = True
                     print(f"\nFATAL I/O ERROR: {fbe}")
+                    protocol.add_protocol_entry(f'FATAL I/O ERROR: {fbe}')
+                    protocol.inc_stat('errors')
                 except RuntimeError as re:
                     fatal_error = True
                     print(f"\nCRITICAL RUNTIME ERROR: {re}")
+                    protocol.add_protocol_entry(f'CRITICAL RUNTIME ERROR: {re}')
+                    protocol.inc_stat('errors')
                 finally:
                     protocol.set_stop_ts()
                     protocol.write_statistics()

@@ -1480,6 +1480,21 @@ class TestSyncLogic(unittest.TestCase):
         self.assertEqual(len(orphans), 0)
 
 
+    def test_protocol_logs_aborts(self):
+        log_file = os.path.join(self.base, "abort_log.txt")
+        with SyncProtocol(log_file=log_file, use_stdout=False) as protocol:
+            protocol.add_protocol_entry('ABORT: Backup process aborted by user signal.')
+            protocol.inc_stat('errors')
+            protocol.set_stop_ts()
+            protocol.write_statistics()
+
+        with open(log_file, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        self.assertIn("ABORT: Backup process aborted by user signal.", content)
+        self.assertIn("Errors Encountered: 1", content)
+
+
 if __name__ == "__main__":
     unittest.main()
 
