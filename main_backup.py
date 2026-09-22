@@ -236,13 +236,27 @@ class BackupDriveLock:
     def touch(self) -> None:
         """
         Refreshes the lock file modification time to indicate ongoing activity.
-        Prevents other processes from assuming the lock is stale during long backup runs.
+        Strictly verifies that the lock file still exists and is still owned by
+        our UUID. If the lock was removed or stolen (e.g. by another process or
+        manual --force-unlock), raises RuntimeError immediately to prevent dual-writer
+        corruption.
         """
-        if self.lock_file_path and os.path.exists(self.lock_file_path):
-            try:
-                os.utime(self.lock_file_path, None)
-            except OSError:
-                pass
+        if not self.lock_file_path or not os.path.exists(self.lock_file_path):
+            raise RuntimeError(
+                f"Drive lock lost: Lock file '{self.lock_file_path}' was removed during operation! "
+                "Aborting immediately to prevent concurrent write corruption."
+            )
+        info = self._read_lock_info()
+        current_uuid = info.get('uuid')
+        if current_uuid and current_uuid != self.lock_uuid:
+            raise RuntimeError(
+                f"Drive lock stolen: Lock file '{self.lock_file_path}' is now owned by UUID '{current_uuid}' "
+                f"(expected '{self.lock_uuid}')! Aborting immediately to prevent concurrent write corruption."
+            )
+        try:
+            os.utime(self.lock_file_path, None)
+        except OSError as e:
+            raise RuntimeError(f"Failed to touch lock file '{self.lock_file_path}': {e}") from e
 
     def __enter__(self) -> 'BackupDriveLock':
         if not self.acquire():
@@ -475,11 +489,6 @@ def main() -> None:
             protocol_file = os.path.join(bdrive, 'protocol.txt')
             archived_base = os.path.join(bdrive, 'recyclebin')
 
-            if not args.dry_run:
-                stale_cleaned = file_core.cleanup_stale_temp_files(bdrive)
-                if stale_cleaned > 0:
-                    print(f"Cleaned up {stale_cleaned} abandoned temporary file(s) on backup drive.")
-
             try:
                 raw_jobs = load_jobs(args.config)
                 backup_jobs = validate_jobs(raw_jobs, bdrive)
@@ -489,6 +498,17 @@ def main() -> None:
             except Exception as e:
                 print(f"ERROR: Could not initialize backup jobs: {e}")
                 sys.exit(1)
+
+            if not args.dry_run:
+                # Fast scoped cleanup: clean stale temp files only in configured job destinations and recyclebin
+                targets_to_clean = {os.path.join(bdrive, job["target_dir"]) for job in backup_jobs}
+                targets_to_clean.add(archived_base)
+                stale_cleaned = 0
+                for tgt in targets_to_clean:
+                    if os.path.exists(tgt):
+                        stale_cleaned += file_core.cleanup_stale_temp_files(tgt)
+                if stale_cleaned > 0:
+                    print(f"Cleaned up {stale_cleaned} abandoned temporary file(s) across backup targets.")
 
             with SyncProtocol(log_file=protocol_file, use_stdout=True) as protocol:
                 protocol.target_drive = bdrive
@@ -503,7 +523,7 @@ def main() -> None:
                     )
 
                     for job in backup_jobs:
-                        drive_lock.touch()
+                        lock_manager.touch()
                         source = job["source"]
                         bk_target = os.path.join(bdrive, job["target_dir"])
                         archive_target = os.path.join(archived_base, job["target_dir"])

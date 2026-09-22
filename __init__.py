@@ -32,6 +32,7 @@ from .file_core import (
     remove_readonly,
     set_readonly,
     sync_metadata,
+    sync_directory,
     utf8_str,
     # Backward compatibility aliases
     checkPaths,
@@ -102,6 +103,7 @@ __all__ = [
     "remove_readonly",
     "set_readonly",
     "sync_metadata",
+    "sync_directory",
     "backup_ts",
     "format_bytes",
     "utf8_str",

@@ -293,9 +293,9 @@ class SyncProtocol:
                     self._file_handle.write(msg)
                 except ValueError:
                     pass
-            if self.use_stdout:
-                print(value)
-                sys.stdout.flush()
+        if self.use_stdout:
+            print(value)
+            sys.stdout.flush()
 
     def set_start_ts(self, force: bool = False) -> None:
         with self._lock:
@@ -590,6 +590,7 @@ class Synchronizer:
                     shutil.copytree(src_lp, staging_lp, symlinks=False)
                     # Atomically rename staging folder to final archive folder on the same volume
                     os.replace(staging_lp, dst_lp)
+                    file_core.sync_directory(b_parent)
                     # Only remove original from backup after archive is 100% verified and in place
                     file_core.remove_directory(backup_directory)
                 except Exception as stage_err:

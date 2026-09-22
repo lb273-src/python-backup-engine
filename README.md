@@ -235,7 +235,7 @@ The orchestrator returns distinct exit codes for reliable integration with cron,
 ├── bkup.sh / bkup.bat   # Cross-platform convenience launchers
 ├── jobs.json            # Synchronization job definitions (user-specific, git-ignored)
 ├── jobs.json.example    # Configuration template
-├── tests/               # Automated unit & regression test suite (50 tests)
+├── tests/               # Automated unit & regression test suite (52 tests)
 │   └── test_sync.py
 ├── LICENSE              # MIT License
 └── README.md            # This file

@@ -1343,7 +1343,52 @@ class TestSyncLogic(unittest.TestCase):
         lock.touch()
         new_mtime = os.stat(lock.lock_file_path).st_mtime
         self.assertGreater(new_mtime, past_mtime)
-        lock.release()
+
+        # 1. Test lock lost (file deleted by external force)
+        if lock.handle:
+            lock.handle.close()
+            lock.handle = None
+        os.remove(lock.lock_file_path)
+        with self.assertRaises(RuntimeError) as ctx_lost:
+            lock.touch()
+        self.assertIn("Drive lock lost", str(ctx_lost.exception))
+
+        # 2. Test lock stolen (file overwritten with another UUID)
+        with open(lock.lock_file_path, "w", encoding="utf-8") as f:
+            f.write("PID: 1234\nHostname: test-host\nUUID: foreign-thief-uuid\n")
+        with self.assertRaises(RuntimeError) as ctx_stolen:
+            lock.touch()
+        self.assertIn("Drive lock stolen", str(ctx_stolen.exception))
+        os.remove(lock.lock_file_path)
+
+    def test_is_fatal_storage_error_hardware_disconnect(self):
+        # Hardware error / device disconnect errnos
+        self.assertTrue(file_core.is_fatal_storage_error(OSError(errno.ENODEV, "No such device")))
+        self.assertTrue(file_core.is_fatal_storage_error(OSError(errno.EIO, "I/O hardware error")))
+        self.assertTrue(file_core.is_fatal_storage_error(OSError(errno.ENOSPC, "No space left")))
+        self.assertTrue(file_core.is_fatal_storage_error(OSError(errno.EROFS, "Read only")))
+
+        # Windows disconnect / I/O winerrors
+        err_not_ready = OSError("Device not ready")
+        err_not_ready.winerror = 21
+        self.assertTrue(file_core.is_fatal_storage_error(err_not_ready))
+
+        err_removed = OSError("Device removed")
+        err_removed.winerror = 433
+        self.assertTrue(file_core.is_fatal_storage_error(err_removed))
+
+        err_io_dev = OSError("I/O device error")
+        err_io_dev.winerror = 1117
+        self.assertTrue(file_core.is_fatal_storage_error(err_io_dev))
+
+        # Non-fatal errors should return False
+        self.assertFalse(file_core.is_fatal_storage_error(OSError(errno.ENOENT, "No such file")))
+        self.assertFalse(file_core.is_fatal_storage_error(OSError(errno.EACCES, "Permission denied")))
+
+    def test_sync_directory(self):
+        # Calling sync_directory must complete cleanly across platforms
+        file_core.sync_directory(self.base)
+        file_core.sync_directory(None)
 
 
 if __name__ == "__main__":

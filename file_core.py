@@ -34,17 +34,55 @@ class FatalBackupError(OSError):
     pass
 
 
+FATAL_ERRNOS = frozenset({
+    errno.ENOSPC,  # 28: No space left on device
+    errno.EROFS,   # 30: Read-only file system
+    getattr(errno, 'ENODEV', 19),  # 19: No such device (e.g. USB drive unplugged)
+    getattr(errno, 'ENXIO', 6),    # 6: No such device or address
+    getattr(errno, 'EIO', 5),      # 5: Hardware I/O error
+})
+
+FATAL_WINERRORS = frozenset({
+    112,   # ERROR_DISK_FULL
+    21,    # ERROR_NOT_READY (Drive disconnected or not ready)
+    433,   # ERROR_DEVICE_REMOVED (USB device removed mid-operation)
+    1117,  # ERROR_IO_DEVICE (The request could not be performed because of an I/O device error)
+})
+
+
 def is_fatal_storage_error(e: BaseException) -> bool:
-    """Check if exception represents an unrecoverable disk-full or read-only filesystem error."""
+    """Check if exception represents an unrecoverable disk-full, read-only filesystem, or disconnected device error."""
     if isinstance(e, FatalBackupError):
         return True
     if isinstance(e, OSError):
-        # errno.ENOSPC = 28 (No space left on device)
-        # errno.EROFS = 30 (Read-only file system)
-        # winerror 112 = ERROR_DISK_FULL
-        if getattr(e, 'errno', None) in (errno.ENOSPC, errno.EROFS) or getattr(e, 'winerror', None) == 112:
+        err = getattr(e, 'errno', None)
+        winerr = getattr(e, 'winerror', None)
+        if err in FATAL_ERRNOS or winerr in FATAL_WINERRORS:
             return True
     return False
+
+
+def sync_directory(directory_path: Optional[PathLike]) -> None:
+    """
+    On POSIX systems (Linux/macOS), flushes parent directory metadata changes
+    (such as file renames or replaces) to persistent storage to guarantee consistency
+    in the event of an abrupt power loss.
+    No-op on Windows (where NTFS journaling handles directory metadata).
+    """
+    if sys.platform != "win32" and directory_path:
+        dp = _long_path(directory_path)
+        if os.path.isdir(dp):
+            try:
+                dir_flags = os.O_RDONLY
+                if hasattr(os, "O_DIRECTORY"):
+                    dir_flags |= os.O_DIRECTORY
+                dir_fd = os.open(dp, dir_flags)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except OSError:
+                pass
 
 
 def _long_path(path: PathLike) -> str:
@@ -170,6 +208,8 @@ def copy_file(source: PathLike, destination: PathLike, follow_symlinks: bool = F
                     time.sleep(0.1 * (attempt + 1))
                     continue
                 raise
+
+        sync_directory(os.path.dirname(destination_lp))
 
         if ro_flag:
             set_readonly(destination)
