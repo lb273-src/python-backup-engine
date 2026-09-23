@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "python-backup-engine"
+version = "1.4.0"
+authors = [
+  { name = "Dipl.-Ing. (FH) Ludger Bröring" },
+]
+description = "High-performance, crash-safe Python incremental backup & synchronization engine with atomic writes, streaming SHA-256 verification, and hardlink versioning."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+keywords = ["backup", "sync", "synchronization", "hardlinks", "incremental", "atomic", "sha256"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: System Administrators",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX",
+    "Operating System :: Unix",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Archiving :: Backup",
+    "Topic :: System :: Filesystems",
+]
+dependencies = []
+
+[project.urls]
+"Homepage" = "https://github.com/lb273-src/python-backup-engine"
+"Bug Tracker" = "https://github.com/lb273-src/python-backup-engine/issues"
+
+[project.scripts]
+backup-engine = "main_backup:main"
+
+[tool.setuptools]
+py-modules = ["file_core", "main_backup", "sync_logic"]

@@ -170,7 +170,7 @@ class SyncProtocol:
     # Type annotations for IDE autocompletion & static typing
     errors: int
     files_checked: int
-    files_updated: int
+    files_updated: int  # Cumulative count of files written (files_created + files_modified)
     files_deleted: int
     directories_checked: int
     directories_created: int
@@ -291,7 +291,8 @@ class SyncProtocol:
             if self._file_handle:
                 try:
                     self._file_handle.write(msg)
-                except ValueError:
+                    self._file_handle.flush()
+                except (ValueError, OSError):
                     pass
         if self.use_stdout:
             print(value)
@@ -395,27 +396,35 @@ class SyncProtocol:
                 f"Errors Encountered: {errors}{nl}"
                 f"Total Time: {self.ts_delta_string()}{nl}{nl}"
             )
+            default_handle = self._file_handle
 
-            target_handle = self._file_handle
-            should_close_custom = False
+        # File I/O and terminal output performed outside of self._lock to prevent deadlocks and contention
+        target_handle = default_handle
+        should_close_custom = False
 
-            if filename and filename != self.log_file:
+        if filename and filename != self.log_file:
+            try:
                 target_handle = open(filename, 'a', encoding='utf-8')
                 should_close_custom = True
+            except OSError:
+                target_handle = None
 
-            if target_handle:
-                try:
-                    target_handle.write(stats_text)
-                    target_handle.flush()
-                except ValueError:
-                    pass
-                finally:
-                    if should_close_custom:
+        if target_handle:
+            try:
+                target_handle.write(stats_text)
+                target_handle.flush()
+            except (ValueError, OSError):
+                pass
+            finally:
+                if should_close_custom:
+                    try:
                         target_handle.close()
+                    except OSError:
+                        pass
 
-            if self.use_stdout:
-                print(stats_text)
-                sys.stdout.flush()
+        if self.use_stdout:
+            print(stats_text)
+            sys.stdout.flush()
 
     def close(self) -> None:
         with self._lock:
@@ -501,90 +510,111 @@ class Synchronizer:
         self,
         backup_file: str,
         backup_path: str,
-        archiv_path: Optional[str],
-        protocol: SyncProtocol,
-        prefer_hardlink: bool = False
+        archive_path: Optional[str] = None,
+        protocol: Optional[SyncProtocol] = None,
+        prefer_hardlink: bool = False,
+        **kwargs
     ) -> ArchiveResult:
-        if not archiv_path or not file_core.is_dir(archiv_path):
+        if archive_path is None and "archiv_path" in kwargs:
+            archive_path = kwargs.pop("archiv_path")
+
+        if not archive_path or not file_core.is_dir(archive_path):
             return ArchiveResult(False, None, method="none")
 
         if self.dry_run:
-            protocol.inc_stat('files_archived')
-            protocol.add_protocol_entry(f'[DRY-RUN] Would archive file: {backup_file}')
+            if protocol:
+                protocol.inc_stat('files_archived')
+                protocol.add_protocol_entry(f'[DRY-RUN] Would archive file: {backup_file}')
             return ArchiveResult(True, None, method="dry_run")
 
         rel_path = os.path.relpath(backup_file, backup_path)
-        archiv_target = os.path.join(archiv_path, rel_path)
+        archive_target = os.path.join(archive_path, rel_path)
 
-        b_dir = os.path.dirname(archiv_target)
-        b_name, b_ext = os.path.splitext(os.path.basename(archiv_target))
+        b_dir = os.path.dirname(archive_target)
+        b_name, b_ext = os.path.splitext(os.path.basename(archive_target))
 
         timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S_%f")
         unique_token = uuid.uuid4().hex[:10]
-        archiv_file = os.path.join(b_dir, f"{b_name}_{timestamp}_{unique_token}{b_ext}")
+        archived_file = os.path.join(b_dir, f"{b_name}_{timestamp}_{unique_token}{b_ext}")
 
         try:
             file_core.make_directory(b_dir)
 
             # Target must be removed on Windows prior to link or move
-            if file_core.path_exists(archiv_file):
-                file_core.remove_file(archiv_file)
+            if file_core.path_exists(archived_file):
+                file_core.remove_file(archived_file)
 
             if prefer_hardlink:
                 try:
                     src_lp = file_core._long_path(backup_file)
-                    dst_lp = file_core._long_path(archiv_file)
+                    dst_lp = file_core._long_path(archived_file)
                     os.link(src_lp, dst_lp)
-                    protocol.inc_stat('files_archived')
-                    protocol.add_protocol_entry(f'archived (hardlink) file {backup_file} -> {archiv_file}')
-                    return ArchiveResult(True, archiv_file, method="hardlink")
+                    if protocol:
+                        protocol.inc_stat('files_archived')
+                        protocol.add_protocol_entry(f'archived (hardlink) file {backup_file} -> {archived_file}')
+                    return ArchiveResult(True, archived_file, method="hardlink")
                 except OSError as link_err:
-                    protocol.add_protocol_entry(
-                        f'Hardlink archive unavailable for {backup_file} ({link_err}), falling back to copy.'
-                    )
+                    if protocol:
+                        protocol.add_protocol_entry(
+                            f'Hardlink archive unavailable for {backup_file} ({link_err}), falling back to copy.'
+                        )
                 # Copy-First Fallback: preserve original file at backup_file until os.replace!
-                shutil.copy2(file_core._long_path(backup_file), file_core._long_path(archiv_file))
-                protocol.inc_stat('files_archived')
-                protocol.add_protocol_entry(f'archived (copied) file {backup_file} -> {archiv_file}')
-                return ArchiveResult(True, archiv_file, method="copy")
+                shutil.copy2(file_core._long_path(backup_file), file_core._long_path(archived_file))
+                if protocol:
+                    protocol.inc_stat('files_archived')
+                    protocol.add_protocol_entry(f'archived (copied) file {backup_file} -> {archived_file}')
+                return ArchiveResult(True, archived_file, method="copy")
 
             file_core.remove_readonly(backup_file)
-            shutil.move(backup_file, archiv_file)
-            protocol.inc_stat('files_archived')
-            protocol.add_protocol_entry(f'archived (moved) file {backup_file} -> {archiv_file}')
-            return ArchiveResult(True, archiv_file, method="move")
+            shutil.move(backup_file, archived_file)
+            if protocol:
+                protocol.inc_stat('files_archived')
+                protocol.add_protocol_entry(f'archived (moved) file {backup_file} -> {archived_file}')
+            return ArchiveResult(True, archived_file, method="move")
         except FileNotFoundError:
             return ArchiveResult(False, None, method="none")
         except Exception as e:
-            protocol.add_protocol_entry(f'Archive move error for {backup_file}: {e}')
-            protocol.inc_stat('errors')
+            if protocol:
+                protocol.add_protocol_entry(f'Archive move error for {backup_file}: {e}')
+                protocol.inc_stat('errors')
             return ArchiveResult(False, None, method="none")
 
-    def archive_directory(self, backup_directory: str, backup_path: str, archiv_path: Optional[str], protocol: SyncProtocol) -> Tuple[bool, Optional[str]]:
-        if not archiv_path or not file_core.is_dir(archiv_path):
+    def archive_directory(
+        self,
+        backup_directory: str,
+        backup_path: str,
+        archive_path: Optional[str] = None,
+        protocol: Optional[SyncProtocol] = None,
+        **kwargs
+    ) -> Tuple[bool, Optional[str]]:
+        if archive_path is None and "archiv_path" in kwargs:
+            archive_path = kwargs.pop("archiv_path")
+
+        if not archive_path or not file_core.is_dir(archive_path):
             return False, None
 
         if self.dry_run:
-            protocol.inc_stat('directories_archived')
-            protocol.add_protocol_entry(f'[DRY-RUN] Would archive directory tree: {backup_directory}')
+            if protocol:
+                protocol.inc_stat('directories_archived')
+                protocol.add_protocol_entry(f'[DRY-RUN] Would archive directory tree: {backup_directory}')
             return True, None
 
         rel_path = os.path.relpath(backup_directory, backup_path)
-        archiv_target = os.path.join(archiv_path, rel_path)
+        archive_target = os.path.join(archive_path, rel_path)
 
-        b_parent = os.path.dirname(archiv_target)
-        b_name = os.path.basename(archiv_target)
+        b_parent = os.path.dirname(archive_target)
+        b_name = os.path.basename(archive_target)
 
         timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S_%f")
         unique_token = uuid.uuid4().hex[:10]
-        archiv_dir = os.path.join(b_parent, f"{b_name}_{timestamp}_{unique_token}")
+        archived_dir = os.path.join(b_parent, f"{b_name}_{timestamp}_{unique_token}")
 
         try:
             file_core.make_directory(b_parent)
 
             # Target directory collision cleanup (safety check)
-            if file_core.path_exists(archiv_dir):
-                file_core.remove_directory(archiv_dir)
+            if file_core.path_exists(archived_dir):
+                file_core.remove_directory(archived_dir)
 
             file_core.remove_readonly(backup_directory)
 
@@ -592,7 +622,7 @@ class Synchronizer:
             moved_atomically = False
             max_retries = 3
             src_lp = file_core._long_path(backup_directory)
-            dst_lp = file_core._long_path(archiv_dir)
+            dst_lp = file_core._long_path(archived_dir)
 
             for attempt in range(max_retries):
                 try:
@@ -629,17 +659,19 @@ class Synchronizer:
                             pass
                     raise stage_err
 
-            protocol.inc_stat('directories_archived')
-            protocol.add_protocol_entry(f'archived (moved) directory tree {backup_directory} -> {archiv_dir}')
-            return True, archiv_dir
+            if protocol:
+                protocol.inc_stat('directories_archived')
+                protocol.add_protocol_entry(f'archived (moved) directory tree {backup_directory} -> {archived_dir}')
+            return True, archived_dir
         except FileNotFoundError:
             return False, None
         except Exception as e:
-            protocol.add_protocol_entry(f'Archive directory move error for {backup_directory}: {e}')
-            protocol.inc_stat('errors')
+            if protocol:
+                protocol.add_protocol_entry(f'Archive directory move error for {backup_directory}: {e}')
+                protocol.inc_stat('errors')
             return False, None
 
-    def _sync_single_file(self, origin_file: str, backup_file: str, backup_path: str, archiv_path: Optional[str], protocol: SyncProtocol, force_hash: bool) -> None:
+    def _sync_single_file(self, origin_file: str, backup_file: str, backup_path: str, archive_path: Optional[str], protocol: SyncProtocol, force_hash: bool) -> None:
         protocol.inc_stat('files_checked')
 
         if file_core.is_symlink(origin_file):
@@ -668,7 +700,7 @@ class Synchronizer:
                     protocol.inc_stat('files_updated')
                     if exists_in_backup:
                         protocol.inc_stat('files_modified')
-                        if archiv_path:
+                        if archive_path:
                             protocol.inc_stat('files_archived')
                             protocol.add_protocol_entry(f'[DRY-RUN] Would archive file: {backup_file}')
                     else:
@@ -684,8 +716,8 @@ class Synchronizer:
                 }
 
                 def pre_replace_hook(dest_path: str) -> None:
-                    if exists_in_backup and archiv_path:
-                        res = self.archive_file(dest_path, backup_path, archiv_path, protocol, prefer_hardlink=True)
+                    if exists_in_backup and archive_path:
+                        res = self.archive_file(dest_path, backup_path, archive_path, protocol, prefer_hardlink=True)
                         success = res[0]
                         path = res[1]
                         method = getattr(res, 'method', 'move')
@@ -703,7 +735,7 @@ class Synchronizer:
                         origin_file,
                         backup_file,
                         verify_hash=should_verify,
-                        pre_replace_callback=pre_replace_hook if (exists_in_backup and archiv_path) else None
+                        pre_replace_callback=pre_replace_hook if (exists_in_backup and archive_path) else None
                     )
                     protocol.inc_stat('files_updated')
                     if exists_in_backup:
@@ -767,9 +799,22 @@ class Synchronizer:
             protocol.inc_stat('errors')
             protocol.add_protocol_entry(f'File sync error on {origin_file}: {e}')
 
-    def backup(self, source_path: str, backup_path: str, archiv_path: Optional[str], protocol: SyncProtocol, excludes: Optional[List[str]] = None, force_hash: bool = False) -> Set[str]:
+    def backup(
+        self,
+        source_path: str,
+        backup_path: str,
+        archive_path: Optional[str] = None,
+        protocol: Optional[SyncProtocol] = None,
+        excludes: Optional[List[str]] = None,
+        force_hash: bool = False,
+        **kwargs
+    ) -> Set[str]:
+        if archive_path is None and "archiv_path" in kwargs:
+            archive_path = kwargs.pop("archiv_path")
+
         ignore_patterns, negations = build_ignore_patterns(excludes, case_sensitive=self.case_sensitive_excludes)
-        protocol.add_protocol_entry(f'#backup  {source_path}  {backup_path}')
+        if protocol:
+            protocol.add_protocol_entry(f'#backup  {source_path}  {backup_path}')
 
         file_tasks: List[Tuple[str, str]] = []
         source_rel_files: Set[str] = set()
@@ -786,8 +831,9 @@ class Synchronizer:
                 if is_ignored(d, rel_d, ignore_patterns, negations, case_sensitive=self.case_sensitive_excludes):
                     continue
                 if file_core.is_symlink(full_d):
-                    protocol.inc_stat('symlinks_skipped')
-                    protocol.add_protocol_entry(f'Skipping symbolic link directory traversal: {full_d}')
+                    if protocol:
+                        protocol.inc_stat('symlinks_skipped')
+                        protocol.add_protocol_entry(f'Skipping symbolic link directory traversal: {full_d}')
                     continue
                 valid_dirs.append(d)
             dirs[:] = valid_dirs
@@ -798,20 +844,25 @@ class Synchronizer:
                 origin_directory = os.path.join(root, dir_name)
                 rel_dir = os.path.relpath(origin_directory, source_path)
                 backup_directory = os.path.join(backup_path, rel_dir)
-                protocol.inc_stat('directories_checked')
+                if protocol:
+                    protocol.inc_stat('directories_checked')
                 if not file_core.path_exists(backup_directory):
                     if not self.dry_run:
                         try:
                             file_core.make_directory(backup_directory)
-                            protocol.inc_stat('directories_created')
+                            if protocol:
+                                protocol.inc_stat('directories_created')
                         except file_core.FatalBackupError:
-                            protocol.inc_stat('errors')
+                            if protocol:
+                                protocol.inc_stat('errors')
                             raise
                         except Exception as e:
-                            protocol.inc_stat('errors')
-                            protocol.add_protocol_entry(f'Dir create error {backup_directory}: {e}')
+                            if protocol:
+                                protocol.inc_stat('errors')
+                                protocol.add_protocol_entry(f'Dir create error {backup_directory}: {e}')
                     else:
-                        protocol.inc_stat('directories_created')
+                        if protocol:
+                            protocol.inc_stat('directories_created')
 
             for file_name in files:
                 origin_file = os.path.join(root, file_name)
@@ -824,7 +875,7 @@ class Synchronizer:
             executor = concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers)
             try:
                 futures = [
-                    executor.submit(self._sync_single_file, orig, bk, backup_path, archiv_path, protocol, force_hash)
+                    executor.submit(self._sync_single_file, orig, bk, backup_path, archive_path, protocol, force_hash)
                     for orig, bk in file_tasks
                 ]
                 for fut in concurrent.futures.as_completed(futures):
@@ -860,18 +911,31 @@ class Synchronizer:
                 executor.shutdown(wait=True)
         else:
             for orig, bk in file_tasks:
-                self._sync_single_file(orig, bk, backup_path, archiv_path, protocol, force_hash)
+                self._sync_single_file(orig, bk, backup_path, archive_path, protocol, force_hash)
                 self.trigger_heartbeat()
 
         self.trigger_heartbeat(force=True)
         return source_rel_files
 
-    def prune(self, source_path: str, backup_path: str, archiv_path: Optional[str], protocol: SyncProtocol, excludes: Optional[List[str]] = None, known_source_files: Optional[Set[str]] = None) -> None:
+    def prune(
+        self,
+        source_path: str,
+        backup_path: str,
+        archive_path: Optional[str] = None,
+        protocol: Optional[SyncProtocol] = None,
+        excludes: Optional[List[str]] = None,
+        known_source_files: Optional[Set[str]] = None,
+        **kwargs
+    ) -> None:
+        if archive_path is None and "archiv_path" in kwargs:
+            archive_path = kwargs.pop("archiv_path")
+
         if not os.path.exists(backup_path):
             return
 
         ignore_patterns, negations = build_ignore_patterns(excludes, case_sensitive=self.case_sensitive_excludes)
-        protocol.add_protocol_entry(f'#prune {backup_path}')
+        if protocol:
+            protocol.add_protocol_entry(f'#prune {backup_path}')
 
         known_sources = known_source_files or set()
         known_sources_lower: Dict[str, str] = {s.lower(): s for s in known_sources}
@@ -894,25 +958,31 @@ class Synchronizer:
                     dir_exists = _exists_case_insensitive(source_path, rel_dir)
 
                 if not dir_exists:
-                    protocol.inc_stat('directories_checked')
+                    if protocol:
+                        protocol.inc_stat('directories_checked')
                     if self.dry_run:
-                        protocol.inc_stat('directories_deleted')
-                        protocol.add_protocol_entry(f'[DRY-RUN] Would prune directory tree: {backup_dir}')
+                        if protocol:
+                            protocol.inc_stat('directories_deleted')
+                            protocol.add_protocol_entry(f'[DRY-RUN] Would prune directory tree: {backup_dir}')
                     else:
-                        if archiv_path:
-                            success, arch_dir = self.archive_directory(backup_dir, backup_path, archiv_path, protocol)
+                        if archive_path:
+                            success, arch_dir = self.archive_directory(backup_dir, backup_path, archive_path, protocol)
                             if success:
-                                protocol.inc_stat('directories_deleted')
+                                if protocol:
+                                    protocol.inc_stat('directories_deleted')
                             else:
-                                protocol.add_protocol_entry(f'PRESERVED: Directory tree kept due to archive error: {backup_dir}')
+                                if protocol:
+                                    protocol.add_protocol_entry(f'PRESERVED: Directory tree kept due to archive error: {backup_dir}')
                         else:
                             try:
                                 file_core.remove_directory(backup_dir)
-                                protocol.inc_stat('directories_deleted')
-                                protocol.add_protocol_entry(f'remove directory tree {backup_dir}')
+                                if protocol:
+                                    protocol.inc_stat('directories_deleted')
+                                    protocol.add_protocol_entry(f'remove directory tree {backup_dir}')
                             except OSError as e:
-                                protocol.inc_stat('errors')
-                                protocol.add_protocol_entry(f'Remove dir error {backup_dir}: {e}')
+                                if protocol:
+                                    protocol.inc_stat('errors')
+                                    protocol.add_protocol_entry(f'Remove dir error {backup_dir}: {e}')
                 else:
                     surviving_dirs.append(d)
 
@@ -938,61 +1008,87 @@ class Synchronizer:
                         is_orphan = True
 
                 if is_orphan:
-                    protocol.inc_stat('files_checked')
+                    if protocol:
+                        protocol.inc_stat('files_checked')
                     if self.dry_run:
-                        protocol.inc_stat('files_deleted')
-                        protocol.add_protocol_entry(f'[DRY-RUN] Would prune orphan file: {backup_file}')
+                        if protocol:
+                            protocol.inc_stat('files_deleted')
+                            protocol.add_protocol_entry(f'[DRY-RUN] Would prune orphan file: {backup_file}')
                     else:
-                        if archiv_path:
-                            success, _ = self.archive_file(backup_file, backup_path, archiv_path, protocol)
+                        if archive_path:
+                            success, _ = self.archive_file(backup_file, backup_path, archive_path, protocol)
                             if success:
-                                protocol.inc_stat('files_deleted')
+                                if protocol:
+                                    protocol.inc_stat('files_deleted')
                             else:
-                                protocol.add_protocol_entry(f'PRESERVED: File kept due to archive error: {backup_file}')
+                                if protocol:
+                                    protocol.add_protocol_entry(f'PRESERVED: File kept due to archive error: {backup_file}')
                         else:
                             if file_core.remove_file(backup_file):
-                                protocol.inc_stat('files_deleted')
-                                protocol.add_protocol_entry(f'remove file {backup_file}')
+                                if protocol:
+                                    protocol.inc_stat('files_deleted')
+                                    protocol.add_protocol_entry(f'remove file {backup_file}')
 
         self.trigger_heartbeat(force=True)
+    def synchronize(
+        self,
+        origin_path: str,
+        backup_path: str,
+        do_sync: bool = True,
+        archive_path: Optional[str] = None,
+        protocol: Optional[SyncProtocol] = None,
+        excludes: Optional[List[str]] = None,
+        force_hash: bool = False,
+        **kwargs
+    ) -> bool:
+        if 'doSync' in kwargs:
+            do_sync = bool(kwargs.pop('doSync'))
+        if 'archiv_path' in kwargs:
+            archive_path = kwargs.pop('archiv_path')
 
-    def synchronize(self, origin_path: str, backup_path: str, doSync: bool, archiv_path: Optional[str], protocol: SyncProtocol, excludes: Optional[List[str]] = None, force_hash: bool = False) -> bool:
         clear_case_cache()
-        protocol.set_start_ts()
+        if protocol:
+            protocol.set_start_ts()
         job_start = time.time()
         try:
             valid, msg = file_core.check_paths(origin_path, backup_path, allow_missing_backup=self.dry_run)
             if not valid:
-                protocol.add_protocol_entry(f'Invalid paths: {msg}')
-                protocol.inc_stat('errors')
+                if protocol:
+                    protocol.add_protocol_entry(f'Invalid paths: {msg}')
+                    protocol.inc_stat('errors')
                 return False
 
-            if archiv_path and not self.dry_run:
-                file_core.make_directory(archiv_path)
+            if archive_path and not self.dry_run:
+                file_core.make_directory(archive_path)
 
-            source_files = self.backup(origin_path, backup_path, archiv_path, protocol, excludes, force_hash)
+            source_files = self.backup(origin_path, backup_path, archive_path, protocol, excludes, force_hash)
 
-            if doSync:
+            if do_sync:
                 clear_case_cache()
-                self.prune(origin_path, backup_path, archiv_path, protocol, excludes, known_source_files=source_files)
+                self.prune(origin_path, backup_path, archive_path, protocol, excludes, known_source_files=source_files)
 
         except file_core.FatalBackupError as fbe:
-            protocol.add_protocol_entry(f'FATAL STORAGE ERROR: Aborting backup job immediately to prevent data loss: {fbe}')
+            if protocol:
+                protocol.add_protocol_entry(f'FATAL STORAGE ERROR: Aborting backup job immediately to prevent data loss: {fbe}')
             raise
         except (KeyboardInterrupt, SystemExit):
-            protocol.add_protocol_entry('synchronize aborted by user signal.')
+            if protocol:
+                protocol.add_protocol_entry('synchronize aborted by user signal.')
             raise
         except RuntimeError as r_err:
-            protocol.add_protocol_entry(f'CRITICAL RUNTIME ERROR: {r_err}')
+            if protocol:
+                protocol.add_protocol_entry(f'CRITICAL RUNTIME ERROR: {r_err}')
             raise
         except Exception as err:
-            protocol.add_protocol_entry(f'synchronize fatal error: {err}')
-            protocol.inc_stat('errors')
+            if protocol:
+                protocol.add_protocol_entry(f'synchronize fatal error: {err}')
+                protocol.inc_stat('errors')
         finally:
             clear_case_cache()
             job_elapsed = time.time() - job_start
-            protocol.set_stop_ts()
-            protocol.add_protocol_entry(f'Job completed in {job_elapsed:.2f}s ({origin_path} -> {backup_path})')
+            if protocol:
+                protocol.set_stop_ts()
+                protocol.add_protocol_entry(f'Job completed in {job_elapsed:.2f}s ({origin_path} -> {backup_path})')
         return True
 
 
@@ -1017,27 +1113,32 @@ class PruneResult(int):
 
 
 def prune_archive(
-    archiv_path: str,
-    retention_days: int,
-    protocol: SyncProtocol,
+    archive_path: Optional[str] = None,
+    retention_days: int = 0,
+    protocol: Optional[SyncProtocol] = None,
     dry_run: bool = False,
-    heartbeat_callback: Optional[Callable[[], None]] = None
+    heartbeat_callback: Optional[Callable[[], None]] = None,
+    **kwargs
 ) -> PruneResult:
     """
-    Prunes archived files and empty directory trees in archiv_path that are older than retention_days.
+    Prunes archived files and empty directory trees in archive_path that are older than retention_days.
     Returns a PruneResult (int subclass) representing the number of pruned files, with .dirs and .total attributes.
     """
-    if retention_days <= 0 or not archiv_path or not file_core.is_dir(archiv_path):
+    if archive_path is None and "archiv_path" in kwargs:
+        archive_path = kwargs.pop("archiv_path")
+
+    if retention_days <= 0 or not archive_path or not file_core.is_dir(archive_path):
         return PruneResult(0, 0)
 
     cutoff_time = time.time() - (retention_days * 86400.0)
     files_pruned = 0
     dirs_pruned = 0
-    protocol.add_protocol_entry(f'#retention-check {archiv_path} (limit: {retention_days} days)')
+    if protocol:
+        protocol.add_protocol_entry(f'#retention-check {archive_path} (limit: {retention_days} days)')
 
     last_hb = time.monotonic()
     # Topdown=False ensures child files and subdirs are removed before their parent directories
-    for root, dirs, files in os.walk(archiv_path, topdown=False):
+    for root, dirs, files in os.walk(archive_path, topdown=False):
         if heartbeat_callback and (time.monotonic() - last_hb >= 15.0):
             last_hb = time.monotonic()
             heartbeat_callback()
@@ -1048,18 +1149,22 @@ def prune_archive(
                 if stat_info.st_mtime < cutoff_time:
                     f_size = stat_info.st_size
                     if dry_run:
-                        protocol.add_protocol_entry(f'[DRY-RUN] Would prune expired archive file ({retention_days}d limit): {f_path}')
-                        files_pruned += 1
-                        protocol.inc_stat('archive_files_pruned')
-                        protocol.inc_stat('archive_bytes_pruned', f_size)
-                    else:
-                        if file_core.remove_file(f_path):
-                            protocol.add_protocol_entry(f'Pruned expired archive file: {f_path}')
-                            files_pruned += 1
+                        if protocol:
+                            protocol.add_protocol_entry(f'[DRY-RUN] Would prune expired archive file ({retention_days}d limit): {f_path}')
                             protocol.inc_stat('archive_files_pruned')
                             protocol.inc_stat('archive_bytes_pruned', f_size)
-            except OSError:
-                pass
+                        files_pruned += 1
+                    else:
+                        if file_core.remove_file(f_path):
+                            if protocol:
+                                protocol.add_protocol_entry(f'Pruned expired archive file: {f_path}')
+                                protocol.inc_stat('archive_files_pruned')
+                                protocol.inc_stat('archive_bytes_pruned', f_size)
+                            files_pruned += 1
+            except OSError as e:
+                if protocol:
+                    protocol.inc_stat('errors')
+                    protocol.add_protocol_entry(f"WARNING: Error inspecting/pruning archive file '{f_path}': {e}")
 
         for d in dirs:
             d_path = os.path.join(root, d)
@@ -1067,18 +1172,23 @@ def prune_archive(
                 # If directory is now empty, prune empty dir
                 if not os.listdir(d_path):
                     if dry_run:
-                        protocol.add_protocol_entry(f'[DRY-RUN] Would remove empty archive folder: {d_path}')
+                        if protocol:
+                            protocol.add_protocol_entry(f'[DRY-RUN] Would remove empty archive folder: {d_path}')
+                            protocol.inc_stat('archive_directories_pruned')
                         dirs_pruned += 1
-                        protocol.inc_stat('archive_directories_pruned')
                     else:
                         if file_core.remove_directory(d_path):
                             dirs_pruned += 1
-                            protocol.inc_stat('archive_directories_pruned')
-            except OSError:
-                pass
+                            if protocol:
+                                protocol.inc_stat('archive_directories_pruned')
+            except OSError as e:
+                if protocol:
+                    protocol.inc_stat('errors')
+                    protocol.add_protocol_entry(f"WARNING: Error inspecting/pruning archive folder '{d_path}': {e}")
 
     if files_pruned > 0 or dirs_pruned > 0:
-        protocol.add_protocol_entry(f'Retention prune completed: {files_pruned} file(s) and {dirs_pruned} empty folder(s) purged.')
+        if protocol:
+            protocol.add_protocol_entry(f'Retention prune completed: {files_pruned} file(s) and {dirs_pruned} empty folder(s) purged.')
     if heartbeat_callback:
         heartbeat_callback()
-    return PruneResult(files_pruned, dirs_pruned)
+    return PruneResult(files_pruned, dirs_pruned)

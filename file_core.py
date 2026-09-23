@@ -412,6 +412,7 @@ def format_line(value: str) -> str:
     return f"{value}\n"
 
 
+# Deprecated alias: use format_line directly instead. Retained for backward compatibility.
 utf8_str = format_line
 
 
@@ -442,8 +443,14 @@ def cleanup_stale_temp_files(target_dir: PathLike, min_age_seconds: float = 1800
     return cleaned
 
 
-def backup_ts() -> str:
-    return f"#{datetime.now().strftime('%d-%m-%Y-%H:%M:%S')}"
+def backup_ts(dt: Optional[datetime] = None) -> str:
+    """
+    Returns an ISO-8601 compatible local timestamp string (YYYY-MM-DD HH:MM:SS).
+    Accepts an optional datetime object for deterministic testing.
+    """
+    if dt is None:
+        dt = datetime.now()
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def format_bytes(size: Union[int, float]) -> str:

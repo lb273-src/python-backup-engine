@@ -50,6 +50,7 @@ from .file_core import (
     syncMetadata,
 )
 from .main_backup import (
+    MAX_WORKERS_LIMIT,
     BackupDriveLock,
     find_backup_drive,
     load_jobs,
@@ -69,7 +70,7 @@ from .sync_logic import (
     prune_archive,
 )
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 __author__ = "Dipl.-Ing. (FH) Ludger Bröring"
 __license__ = "MIT"
 
@@ -80,6 +81,7 @@ __all__ = [
     "ArchiveResult",
     "PruneResult",
     "DEFAULT_EXCLUDES",
+    "MAX_WORKERS_LIMIT",
     "build_ignore_patterns",
     "is_ignored",
     "normalize_rel_path",

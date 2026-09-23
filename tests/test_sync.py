@@ -30,6 +30,7 @@ if SYNC_DIR not in sys.path:
     sys.path.insert(0, SYNC_DIR)
 
 import file_core
+import main_backup
 import importlib.util
 
 if "sync" in sys.modules:
@@ -1493,6 +1494,83 @@ class TestSyncLogic(unittest.TestCase):
 
         self.assertIn("ABORT: Backup process aborted by user signal.", content)
         self.assertIn("Errors Encountered: 1", content)
+
+    def test_max_workers_capped(self):
+        """Verify that max_workers in jobs.json is clamped to MAX_WORKERS_LIMIT."""
+        raw_jobs = [{
+            "source": self.source,
+            "target_dir": "target",
+            "max_workers": 9999
+        }]
+        validated = main_backup.validate_jobs(raw_jobs, self.target)
+        self.assertEqual(len(validated), 1)
+        self.assertEqual(validated[0]["max_workers"], main_backup.MAX_WORKERS_LIMIT)
+
+    def test_prune_archive_handles_oserror(self):
+        """Verify that OSError during archive pruning is counted as error and logged to protocol."""
+        arch_dir = os.path.join(self.archive, "corrupt_sub")
+        os.makedirs(arch_dir, exist_ok=True)
+        arch_file = os.path.join(arch_dir, "old.txt")
+        with open(arch_file, "w") as f:
+            f.write("content")
+        # Set mtime far in the past
+        past = time.time() - 1000000
+        os.utime(arch_file, (past, past))
+
+        log_file = os.path.join(self.base, "prune_err_log.txt")
+        with SyncProtocol(log_file=log_file, use_stdout=False) as protocol:
+            import unittest.mock
+            with unittest.mock.patch("os.stat", side_effect=OSError("Disk read-only")):
+                res = prune_archive(archive_path=self.archive, retention_days=1, protocol=protocol)
+                self.assertEqual(protocol.stats["errors"], 1)
+
+        with open(log_file, "r", encoding="utf-8") as f:
+            log_content = f.read()
+        self.assertIn("WARNING: Error inspecting/pruning archive file", log_content)
+
+    def test_synchronize_backward_compat(self):
+        """Verify that synchronize supports both PEP 8 names and legacy doSync/archiv_path kwargs."""
+        syncer = Synchronizer(max_workers=1)
+        protocol = SyncProtocol(use_stdout=False)
+
+        # Call with new PEP 8 naming
+        res1 = syncer.synchronize(
+            origin_path=self.source,
+            backup_path=self.target,
+            do_sync=True,
+            archive_path=self.archive,
+            protocol=protocol
+        )
+        self.assertTrue(res1)
+
+        # Call with legacy naming
+        res2 = syncer.synchronize(
+            origin_path=self.source,
+            backup_path=self.target,
+            doSync=True,
+            archiv_path=self.archive,
+            protocol=protocol
+        )
+        self.assertTrue(res2)
+
+    def test_backup_ts_format(self):
+        """Verify backup_ts generates ISO-like timestamp without unparseable '#' prefix."""
+        ts = file_core.backup_ts()
+        self.assertFalse(ts.startswith("#"))
+        import re
+        self.assertRegex(ts, r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+
+    def test_main_returns_integer_exit_code(self):
+        """Verify main() returns integer exit codes (1 for missing drive, 2 for lock error)."""
+        import unittest.mock
+        with unittest.mock.patch("sys.argv", ["main_backup.py"]):
+            with unittest.mock.patch("main_backup.find_backup_drive", return_value=None):
+                exit_code = main_backup.main()
+                self.assertEqual(exit_code, 1)
+
+        with unittest.mock.patch("sys.argv", ["main_backup.py", "--drive", "NON_EXISTENT_DRIVE_PATH_XYZ_123"]):
+            exit_code = main_backup.main()
+            self.assertEqual(exit_code, 2)
 
 
 if __name__ == "__main__":

@@ -38,6 +38,10 @@ except ImportError:
     from sync_logic import SyncProtocol, Synchronizer, prune_archive  # type: ignore # pyright: ignore
 
 
+# Maximum allowable concurrency per job to prevent accidental resource exhaustion
+MAX_WORKERS_LIMIT: int = 64
+
+
 def is_pid_running(pid: int) -> bool:
     if pid <= 0:
         return False
@@ -286,6 +290,11 @@ class BackupDriveLock:
 
 
 class NoOpLock:
+    """
+    No-operation lock used exclusively during --dry-run mode.
+    Does not acquire any filesystem lock, and all heartbeat touch() calls are no-ops.
+    NOTE: Dry-run intentionally provides no mutual exclusion against concurrent active backups.
+    """
     def __enter__(self) -> 'NoOpLock': return self
     def __exit__(self, exc_type, exc_val, exc_tb) -> None: pass
     def touch(self) -> None: pass
@@ -416,7 +425,7 @@ def validate_jobs(jobs: List[Dict[str, Any]], base_drive: str) -> List[Dict[str,
             "case_sensitive_excludes": case_sensitive_excludes,
             "force_hash": bool(job.get("force_hash", False)),
             "verify_copy": bool(job.get("verify_copy", True)),
-            "max_workers": max(1, int(job.get("max_workers", 4))),
+            "max_workers": min(max(1, int(job.get("max_workers", 4))), MAX_WORKERS_LIMIT),
             "retention_days": retention_days
         })
     return validated
@@ -477,8 +486,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--lock-timeout", type=int, default=None, help="Override stale lock timeout in seconds (default: 7200 / 2 hours)")
     return parser.parse_args()
 
-
-def main() -> None:
+def main() -> int:
     args = parse_arguments()
 
     print("Starting Backup Orchestrator...")
@@ -489,7 +497,7 @@ def main() -> None:
     if not bdrive:
         print("ERROR: No valid Backup Drive with '.backup_id' found!")
         print("Please connect Backup Drive or specify via --drive <path>.")
-        sys.exit(1)
+        return 1
 
     print(f"Backup Drive '{bdrive}' detected. Starting Backup Jobs.")
 
@@ -511,10 +519,10 @@ def main() -> None:
                 backup_jobs = validate_jobs(raw_jobs, bdrive)
                 if not backup_jobs:
                     print("ERROR: No valid backup jobs configured!")
-                    sys.exit(1)
+                    return 1
             except Exception as e:
                 print(f"ERROR: Could not initialize backup jobs: {e}")
-                sys.exit(1)
+                return 1
 
             if not args.dry_run:
                 # Fast scoped cleanup: clean stale temp files only in configured job destinations and recyclebin
@@ -548,7 +556,7 @@ def main() -> None:
                         job_excludes = job["excludes"]
                         force_hash = job["force_hash"]
                         verify_copy = False if args.no_verify else job["verify_copy"]
-                        user_workers = max(1, args.workers) if args.workers is not None else None
+                        user_workers = min(max(1, args.workers), MAX_WORKERS_LIMIT) if args.workers is not None else None
                         max_workers = user_workers or job["max_workers"]
 
                         print(f"\n--- Starting Job: {source} -> {bk_target} (Workers: {max_workers}) ---")
@@ -568,8 +576,8 @@ def main() -> None:
                         synchronizer.synchronize(
                             origin_path=source,
                             backup_path=bk_target,
-                            doSync=True,
-                            archiv_path=archive_target,
+                            do_sync=True,
+                            archive_path=archive_target,
                             protocol=protocol,
                             excludes=job_excludes,
                             force_hash=force_hash
@@ -606,14 +614,14 @@ def main() -> None:
 
     except RuntimeError as lock_err:
         print(f"ERROR: {lock_err}")
-        sys.exit(2)
+        return 2
 
     if fatal_error:
-        sys.exit(3)
+        return 3
     if run_errors > 0:
-        sys.exit(4)
-    sys.exit(0)
+        return 4
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
