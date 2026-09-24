@@ -10,7 +10,7 @@ Python Backup & Synchronization Suite
 @license     MIT
 """
 
-from .file_core import (
+from file_core import (
     FatalBackupError,
     backup_ts,
     check_paths,
@@ -49,7 +49,7 @@ from .file_core import (
     removeFile,
     syncMetadata,
 )
-from .main_backup import (
+from main_backup import (
     MAX_WORKERS_LIMIT,
     BackupDriveLock,
     find_backup_drive,
@@ -58,7 +58,7 @@ from .main_backup import (
     prune_expired_archives,
     validate_jobs,
 )
-from .sync_logic import (
+from sync_logic import (
     DEFAULT_EXCLUDES,
     ArchiveResult,
     PruneResult,
